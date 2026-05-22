@@ -15,23 +15,25 @@ Knowledge-Distillation/
 ├── docs/                        # Reference papers
 ├── grade-school-math/           # GSM8K dataset
 ├── math/                        # MATH dataset
-├── scripts/
-│   ├── generate_cot.py          # Generate CoT traces from teacher
-│   ├── train.py                 # Fine-tune student model
-│   └── evaluate.py              # Evaluate accuracy on test sets
+├── basic/
+│   ├── generate_CoT.py          # Two-stage CoT generation from teacher
+│   ├── load_grade_school_math_dataset.py  # GSM8K data preprocessing
+│   └── load_MATH_dataset.py     # MATH data preprocessing
 ├── data/
-│   ├── gsm8k_cot/               # Generated CoT traces for GSM8K
-│   └── math_cot/                # Generated CoT traces for MATH
-├── configs/
-│   └── training_config.yaml     # Hyperparameters and settings
-└── test.py                      # Quick test for teacher model inference
+│   ├── gsm8k_train_stage1.jsonl # Stage 1 CoT output (rationale + answer)
+│   └── gsm8k_train_stage2.jsonl # Stage 2 refined answers
 ```
 
 ## Pipeline Overview
 
-### 1. CoT Trace Generation (Teacher)
+### 1. CoT Trace Generation (Teacher) — Two-Stage
 
-Use DeepSeek-R1-Distill-Qwen-1.5B to generate step-by-step reasoning traces on GSM8K/MATH subsets.
+**Stage 1**: Prompt the teacher with `Q: <problem>. A: Let's think step by step.`  
+The model generates `<rationale> Therefore, the answer is <answer>`.  
+Output: `{"problem", "rationale", "answer"}`
+
+**Stage 2**: Re-prompt with `Q: <problem>. A: Let's think step by step. <rationale>. Therefore, the answer is`  
+The model regenerates just the answer given its own reasoning.
 
 ### 2. Fine-Tuning (Student)
 
@@ -50,14 +52,17 @@ Evaluate the fine-tuned student on GSM8K and MATH test splits. Metrics:
 ## Quick Start
 
 ```bash
-# 1. Generate CoT data from teacher
-python scripts/generate_cot.py --dataset gsm8k --output data/gsm8k_cot/
+# 1. Stage 1: Generate CoT reasoning from teacher
+python basic/generate_CoT.py --dataset gsm8k --max_samples 100
 
-# 2. Fine-tune student
-python scripts/train.py --config configs/training_config.yaml
+# 2. Stage 2: Regenerate answer given the rationale
+python basic/generate_CoT.py --stage 2 --dataset gsm8k --max_samples 100
 
-# 3. Evaluate
-python scripts/evaluate.py --model outputs/student_model --dataset gsm8k
+# 3. Fine-tune student (WIP)
+# python scripts/train.py --config configs/training_config.yaml
+
+# 4. Evaluate (WIP)
+# python scripts/evaluate.py --model outputs/student_model --dataset gsm8k
 ```
 
 ## Requirements
