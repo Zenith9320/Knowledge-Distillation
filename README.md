@@ -65,14 +65,36 @@ python basic/generate_CoT.py --stage 2 --dataset gsm8k --max_samples 100
 # python scripts/evaluate.py --model outputs/student_model --dataset gsm8k
 ```
 
-## Requirements
+## Environment Setup
 
-- Python 3.10+
-- PyTorch 2.0+
-- Transformers
-- Datasets
-- PEFT (optional, for LoRA)
-- vLLM (optional, for fast inference)
+使用 mamba (miniforge) 创建独立环境:
+
+```bash
+# 1. 创建环境 (Python 3.12，锁定 PyTorch CUDA 版本)
+mamba create -n kd python=3.12 -y
+mamba activate kd
+
+# 2. 安装 PyTorch CUDA 版本 (注意：必须匹配 CUDA 构建，不能装 CPU 版本)
+mamba install "pytorch=2.5.1=*cuda*" torchvision torchaudio \
+  pytorch-cuda=12.4 -c pytorch -c nvidia -c conda-forge --override-channels -y
+
+# 3. 安装 HuggingFace 生态
+mamba install transformers accelerate datasets tqdm -c conda-forge -y
+
+# 4. (可选) vLLM 用于批量推理加速
+pip install vllm
+```
+
+验证环境:
+
+```bash
+python -c "import torch,transformers,accelerate,tqdm,datasets;print(f'PyTorch {torch.__version__}');print(f'CUDA:{torch.cuda.is_available()}');print(f'GPU:{torch.cuda.get_device_name(0)}');x=torch.randn(3,3).cuda();print(f'MATMUL OK:{(x@x.T).shape}');print(f'transformers {transformers.__version__}');print('OK')"
+```
+
+**注意事项:**
+- 必须从 pytorch channel 安装带 `*cuda*` 构建的 PyTorch，conda-forge 默认为 CPU 版本
+- `--override-channels` 防止 conda-forge 的 CPU 版本覆盖
+- Python 3.13 暂不推荐，部分包兼容性不稳定
 
 ## Key Design Decisions
 
