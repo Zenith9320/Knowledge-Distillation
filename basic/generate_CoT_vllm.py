@@ -111,7 +111,10 @@ def process_dataset(
         batches = list(chunked(records, batch_size))
         for batch in tqdm(batches, desc=dataset_key):
             prompts = [
-                {"role": "user", "content": record["problem"]}
+                [
+                    {"role": "system", "content": "You are a math expert. Solve the problem step by step, showing your reasoning clearly. Put your final numeric answer in \\boxed{}."},
+                    {"role": "user", "content": f"Problem: {record['problem']}"},
+                ]
                 for record in batch
             ]
 
@@ -121,7 +124,7 @@ def process_dataset(
                 rationale_raw = output.outputs[0].text
                 rationale = clean_deepseek_tags(rationale_raw)
 
-                answer = f"{rationale}."
+                answer = rationale
 
                 out = {"problem": record["problem"], "answer": answer}
                 if "type" in record:
@@ -167,6 +170,12 @@ def main():
         help=f"Teacher model to use (default: {MODEL_NAME})",
     )
     parser.add_argument(
+        "--temperature",
+        type=float,
+        default=0.6,
+        help="Sampling temperature (default: 0.6). Higher = more diverse.",
+    )
+    parser.add_argument(
         "--gpu_memory_utilization",
         type=float,
         default=0.90,
@@ -188,6 +197,7 @@ def main():
             ds_key,
             max_samples=args.max_samples,
             max_tokens=args.max_tokens,
+            temperature=args.temperature,
             batch_size=args.batch_size,
         )
 
