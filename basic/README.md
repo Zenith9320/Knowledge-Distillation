@@ -268,22 +268,39 @@ basic/
 
 在开始过滤之前，首先检查了 teacher model 生成的 CoT 数据质量，发现以下问题：
 
-| 问题 | 说明 | 数据占比（GSM8K） |
-|------|------|--------------------|
-| **无 `\boxed{}` 标记** | 部分样本未按要求将最终答案放入 `\boxed{}`，而是使用完整自然语言回答（如 `**Answer:** Alexis paid $41 for the shoes.`），导致无法通过 `\boxed{}` 直接提取。已通过 `**Answer:**` 回退提取机制解决大部分情况。 | ~17.8%（1329/7473） |
-| **答案包含单位/文本** | 部分 `\boxed{}` 内除数值外还包含 LaTeX 文本（如 `16 \\text{ hours}`、`400 \\, \\text{ml}`、`75\\%`），直接用于数值比对需要额外清洗。 | 少量 |
-| **生成长度截断** | 部分样本因达到 `max_new_tokens=2048` 限制而截断，CoT 末尾不完整，可能缺失 `\boxed{}` 标记或导致推理不完整。 | 待统计 |
+| 问题 | 说明 | GSM8K | MATH |
+|------|------|-------|------|
+| **无 `\boxed{}` 标记** | 部分样本未按要求将最终答案放入 `\boxed{}`，而是使用完整自然语言回答或 `**Answer:**` 格式。已通过回退提取机制解决大部分情况。 | ~17.8%（1329/7473） | ~33.6%（3783/11248） |
+| **答案包含单位/文本** | 部分 `\boxed{}` 内除数值外还包含 LaTeX 文本（如 `16 \\text{ hours}`、`400 \\, \\text{ml}`），直接用于数值比对需要额外清洗。 | 少量 | 少量 |
+| **生成长度截断** | 部分样本因达到 `max_new_tokens=2048` 限制而截断，CoT 末尾不完整，可能缺失 `\boxed{}` 标记或导致推理不完整。 | 待统计 | 待统计 |
+| **非数值答案** | MATH 答案包含代数表达式（`x^3+2x^2+x`）、LaTeX 分数（`\frac{3}{10}`）、日期（`June 20`）等非纯数值形式，需不同处理策略。 | 不适用 | ~21.3%（2395/11248） |
 
-这些问题需要在过滤阶段逐步处理：当前 Boxed 提取步骤主要解决格式统一问题，后续答案比对步骤将进一步处理数值清洗和截断样本。
+这些问题需要在过滤阶段逐步处理：GSM8K 和 MATH 采用不同的提取和比对策略（通过 `--math` 参数切换）。
 
 ### 3.1 Boxed 提取
 
 从 teacher model 生成的 CoT 解答中提取 `\boxed{...}` 包裹的最终答案。
 
 - 采用**括号匹配算法**定位 `\boxed{...}` 边界，正确处理嵌套花括号。
-- 若某条 CoT 中不存在 `\boxed{}`，则启用 `**Answer:**` **回退提取机制**（见下方）。
+- 通过 `--math` 参数切换 GSM8K 和 MATH 两种处理模式（见下方）。
 
-#### `**Answer:**` 回退提取
+#### GSM8K 模式（默认）
+
+若某条 CoT 中不存在 `\boxed{}`，则依次启用两级回退：
+
+1. **`**Answer:**` 回退提取**（见下方）
+2. **末尾数字回退**（last-resort）：若 `\boxed{}` 和 `**Answer:**` 均未提取到答案，且 CoT 以 `.` 结尾，取全文最后一次出现的数字。
+
+#### MATH 模式（`--math`）
+
+MATH 数据集的答案形式更多样（代数表达式、LaTeX 分数、日期等），采用更宽松的提取策略：
+
+- **仅提取 `\boxed{}`** 内容，找不到则启用 **`**Answer:**` 回退**（不触发末尾数字回退）
+- **日期识别**：检测 `**Answer:**` 后的月份名 + 数字（如 `June 20th` → `June 20`），处理 `st`/`nd`/`rd`/`th` 序数后缀
+- **分数转换**：`**Answer:**` 后的分数 `4/5` 自动转为 `\frac{4}{5}` 以匹配 ground-truth LaTeX 格式
+- 保留 LaTeX 命令（`\frac`、指数 `^2`、`^3` 等），不强制转为纯数值
+
+#### `**Answer:**` 回退提取（GSM8K 模式）
 
 针对未使用 `\boxed{}` 的样本，从 `**Answer:**`（或 `**Answer**:`）标记处提取最终答案：
 
@@ -304,19 +321,22 @@ basic/
 - 回退提取的数字同样经过 `clean_final_answer()` 清洗（去逗号、LaTeX 符号等），与 `\boxed{}` 路径一致。
 - 若 `**Answer:**` 中仅含英文数字（如 "Five"），则无法提取，`final_answer` 留空。
 
-#### 末尾数字回退（last-resort）
+#### 末尾数字回退（last-resort，仅 GSM8K 模式）
 
 若 `\boxed{}` 和 `**Answer:**` 均未提取到答案，且 CoT 文本以 `.` 结尾（说明推理未在中途截断），则取全文最后一次出现的数字作为 `final_answer`。
 
 - 典型场景：模型使用 `**Final Answer:**`、`Answer:`、`**Conclusion:**` 等变体标记，或直接用自然语言收尾但未使用 `\boxed{}`。
 - 该回退同样经过 `clean_final_answer()` 清洗。
 - 若文本不以 `.` 结尾（截断样本），则不触发此回退，避免取到中间计算结果。
+- **MATH 模式不启用此回退**，因为 MATH 的答案不一定是数字，取末尾数字易误提取中间结果。
 
 ### 3.2 答案清洗
 
-对提取出的 `final_answer` 进行清洗，去除单位和 LaTeX 格式，使答案尽可能为纯数值，便于后续与 ground-truth 比对。
+对提取出的 `final_answer` 进行清洗，去除单位和 LaTeX 格式。GSM8K 和 MATH 模式采用不同的清洗策略。
 
-#### 清洗内容
+#### GSM8K 模式清洗
+
+目标是使答案尽可能为纯数值，便于后续与 ground-truth 数值比对。
 
 | 类别 | 原始示例 | 清洗后 |
 |------|----------|--------|
@@ -331,10 +351,28 @@ basic/
 
 实现通过 `clean_final_answer()` 函数，按顺序处理：`\text{...}` 块移除 → `\overline{...}` 提取内层 → `\dfrac` / `\frac` 转换 → 格式化符号移除 → 数字逗号移除 → 残余清理。
 
+#### MATH 模式清洗
+
+保留有意义的 LaTeX 结构和代数符号，仅移除无关格式化标记：
+
+| 操作 | GSM8K | MATH |
+|------|-------|------|
+| `\text{...}` 移除 | 整体删除 | **保留内部内容**（如 `\text{42}` → `42`） |
+| `\overline{...}` | 保留内部内容 | 保留内部内容 |
+| `\frac` / `\dfrac` 转换 | 转为 `a/b` | **保留原样** |
+| `\begin{}`/`\end{}` 移除 | 移除 | **保留** |
+| 指数 `^2` / `^3` / `^4` | 删除 | **保留** |
+| 时间格式标准化 | 是 | 跳过 |
+| 反斜杠残余清理 | 全部移除 | 仅移除格式化命令，保留 LaTeX 命令 |
+
 #### 使用方法
 
 ```bash
+# GSM8K 模式（默认）
 python filter.py -i data/gsm8k_train_cot.jsonl -o data/gsm8k_train_cot_filtered.jsonl
+
+# MATH 模式
+python filter.py --math -i data/math_train_cot.jsonl -o data/math_train_cot_filtered.jsonl
 ```
 
 #### GSM8K 处理结果
@@ -350,52 +388,95 @@ python filter.py -i data/gsm8k_train_cot.jsonl -o data/gsm8k_train_cot_filtered.
 | 仍含非数值（表达式/多值等） | 16 |
 | `final_answer` 仍为空 | 163 |
 
-剩余 163 条空值主要为 CoT 截断（未以 `.` 结尾）或无任何数值的样本，以及 16 条非数值表达式。空值和非数值样本将在后续答案比对步骤中统一处理。
+剩余 163 条空值主要为 CoT 截断（未以 `.` 结尾）或无任何数值的样本，以及 16 条非数值表达式。
+
+#### MATH 处理结果
+
+| 统计项 | 数量 |
+|--------|------|
+| 总样本 | 11,248 |
+| 提取到 `\boxed{}`（非空） | 7,457 |
+| `**Answer:**` 回退提取（非空） | 410 |
+| 其中含 LaTeX 分数（`\frac`） | 91 |
+| 其中含日期答案 | 3 |
+| 含代数表达式等非纯数值 | 2,395 |
+| `final_answer` 仍为空 | 3,381 |
+
+MATH 空值比例（30.1%）远高于 GSM8K（2.2%），主要因为 teacher model 在 MATH 题目中更倾向于不使用 `\boxed{}` 标记答案。
+
+#### 不合格答案自动分离
+
+`--bad_output` / `-b` 参数可在过滤同时将 `final_answer` 为空的条目输出到独立文件：
+
+```bash
+python filter.py --math -i data/math_train_cot.jsonl -o data/math_train_cot_filtered.jsonl \
+  -b data/math_train_cot_bad.jsonl
+```
 
 #### 输出格式
 
 ```json
+// GSM8K
 {"problem": "Natalia sold clips...", "answer": "**Solution:**...", "final_answer": "72"}
+
+// MATH（额外包含 type 和 level）
+{"problem": "Expand the product...", "answer": "To expand the product...", "final_answer": "x^3 + 2x^2 + x", "type": "Algebra", "level": "Level 3"}
 ```
 
 ### 3.3 不合格答案分离
 
-将 Boxed 提取和清洗后仍然不合格的样本（`final_answer` 为空或非数值）从主数据集中分离出来，输出到独立文件，方便人工检查或后续处理。
+将 Boxed 提取和清洗后 `final_answer` 为空的样本自动分离到独立文件，方便人工检查或后续处理。
 
-#### 判断标准
+`filter.py` 的 `--bad_output` / `-b` 参数在过滤过程中同时完成分离，无需额外脚本。
 
-| 分类 | 条件 | 数量 |
-|------|------|------|
-| 空值 | `final_answer == ""`（CoT 截断、无任何数值等） | 163 |
-| 非数值 | `final_answer` 非纯数值、小数或分数（如 `3x`、`64 32`、`10 + (-6) + 4.67`） | 16 |
+| 分类 | 条件 | GSM8K | MATH |
+|------|------|-------|------|
+| 空值 | `final_answer == ""` | 163 | 3,381 |
 
 #### 使用方法
 
 ```bash
-python filter_bad_answers.py -i data/gsm8k_train_cot_filtered.jsonl -o data/gsm8k_train_cot_bad.jsonl
+# GSM8K
+python filter.py -i data/gsm8k_train_cot.jsonl -o data/gsm8k_train_cot_filtered.jsonl \
+  -b data/gsm8k_train_cot_bad.jsonl
+
+# MATH
+python filter.py --math -i data/math_train_cot.jsonl -o data/math_train_cot_filtered.jsonl \
+  -b data/math_train_cot_bad.jsonl
 ```
 
 #### 输出
 
-输出文件保留原始全部字段（`problem`、`answer`、`final_answer`），便于逐条审查不合格原因。
+输出文件保留原始全部字段（`problem`、`answer`、`final_answer`、`type`、`level`），便于逐条审查不合格原因。
 
 ### 3.4 答案比对
 
-将 `final_answer` 与 ground-truth 答案进行比对，统计最终正确率。
+将 `final_answer` 与 ground-truth 答案进行比对，统计最终正确率。GSM8K 和 MATH 采用不同的比对策略。
 
-#### 比对逻辑
+#### GSM8K 比对逻辑
 
 1. 判断 `final_answer` 类别：空值 / 非数值 / 合法数值（整数、小数或分数如 `35/6`）
 2. 对合法数值，去除千分位逗号后转为浮点数与 ground-truth 比对（容差 `1e-9`）
 3. 空值和非数值直接计为错误
 
+#### MATH 比对逻辑
+
+1. 判断 `final_answer` 类别：空值 / 非空
+2. 对非空答案，使用**字符串比对**（空白符归一化后），因为 MATH 答案包含 LaTeX 表达式、分数、日期等非纯数值形式
+3. 空值计为错误
+
 #### 使用方法
 
 ```bash
-# 一步完成：Boxed 提取 + 答案清洗 + 比对统计 + 训练集输出
+# gsm8k数据集
 python filter.py -i data/gsm8k_train_cot.jsonl -o data/gsm8k_train_cot_filtered.jsonl \
   -g data/gsm8k_train.jsonl -r data/gsm8k_comparison_report.txt \
   -c data/gsm8k_train_cot_correct.jsonl -w data/gsm8k_train_cot_incorrect.jsonl
+
+# math数据集
+python filter.py --math -i data/math_train_cot.jsonl -o data/math_train_cot_filtered.jsonl \
+  -g data/math_train.jsonl -r data/math_comparison_report.txt \
+  -c data/math_train_cot_correct.jsonl -w data/math_train_cot_incorrect.jsonl
 ```
 
 #### GSM8K 比对结果
@@ -413,26 +494,71 @@ python filter.py -i data/gsm8k_train_cot.jsonl -o data/gsm8k_train_cot_filtered.
 | 总准确率（correct / total） | 84.28% |
 | 合法数值准确率（correct / valid） | 86.34% |
 
+#### MATH 比对结果
+
+| 统计项 | 数量 | 占比 |
+|--------|------|------|
+| 总样本 | 11,248 | 100% |
+| `final_answer` 为空 | 3,381 | 30.1% |
+| `final_answer` 非空（valid） | 7,867 | 69.9% |
+| **比对正确** | **5,341** | **47.5%** |
+
+| 准确率指标 | 值 |
+|-----------|------|
+| 总准确率（correct / total） | 47.48% |
+| 非空答案准确率（correct / valid） | 67.89% |
+
+MATH 总准确率显著低于 GSM8K，主要由两方面因素叠加：30.1% 的空答案率 + 非空答案中仍有 32.1% 比对错误。
+
+#### 按题目类型与难度分类统计（MATH）
+
+| 类型 | 总数 | 空 | 有效 | 正确 | 准确率 | 有效准确率 |
+|------|------|-----|------|------|--------|------------|
+| Algebra | 2,645 | 248 | 2,397 | 1,770 | 66.9% | 73.8% |
+| Counting & Probability | 1,112 | 388 | 724 | 434 | 39.0% | 59.9% |
+| Geometry | 1,228 | 575 | 653 | 410 | 33.4% | 62.8% |
+| Intermediate Algebra | 1,951 | 976 | 975 | 575 | 29.5% | 59.0% |
+| Number Theory | 1,256 | 420 | 836 | 725 | 57.7% | 86.7% |
+| Prealgebra | 1,893 | 242 | 1,651 | 1,188 | 62.8% | 72.0% |
+| Precalculus | 1,163 | 532 | 631 | 239 | 20.6% | 37.9% |
+
+| 难度 | 总数 | 空 | 有效 | 正确 | 准确率 | 有效准确率 |
+|------|------|-----|------|------|--------|------------|
+| Level 1 | 914 | 67 | 847 | 661 | 72.3% | 78.0% |
+| Level 2 | 2,038 | 253 | 1,785 | 1,256 | 61.6% | 70.4% |
+| Level 3 | 2,427 | 489 | 1,938 | 1,293 | 53.3% | 66.7% |
+| Level 4 | 2,603 | 783 | 1,820 | 1,200 | 46.1% | 65.9% |
+| Level 5 | 3,264 | 1,789 | 1,475 | 929 | 28.5% | 63.0% |
+
+准确率随难度递增递减，Level 5 空答案率高达 54.8%，说明难题上 teacher model 更倾向于不输出 `\boxed{}`。
+
 #### 输出文件
 
-| 参数 | 输出文件 | 内容 | 数量 |
-|------|----------|------|------|
-| `-o` | `data/gsm8k_train_cot_filtered.jsonl` | 全部样本（追加 `final_answer` 字段） | 7,473 |
-| `-c` | `data/gsm8k_train_cot_correct.jsonl` | **比对正确的样本（student 训练集）** | 6,298 |
-| `-w` | `data/gsm8k_train_cot_incorrect.jsonl` | 合法数值但比对错误的样本 | 996 |
-| `-r` | `data/gsm8k_comparison_report.txt` | 比对统计报告 | — |
+| 参数 | 输出文件 | 内容 | GSM8K | MATH |
+|------|----------|------|-------|------|
+| `-o` | `*_filtered.jsonl` | 全部样本（追加 `final_answer` 字段） | 7,473 | 11,248 |
+| `-c` | `*_correct.jsonl` | **比对正确的样本（student 训练集）** | 6,298 | 5,341 |
+| `-w` | `*_incorrect.jsonl` | 非空但比对错误的样本 | 996 | 2,526 |
+| `-b` | `*_bad.jsonl` | `final_answer` 为空的样本 | 163 | 3,381 |
+| `-r` | `*_report.txt` | 比对统计报告 | — | — |
 
 ### 3.5 原因分析
 
-对 84.28% 总准确率背后的错误来源进行分析：
-
-#### 错误分布
+#### GSM8K 错误分布
 
 | 错误类别 | 数量 | 占比 | 说明 |
 |----------|------|------|------|
 | 合法数值但答案错误 | 996 | 13.3% | 推理过程有误，最终数值与 ground-truth 不符 |
 | `final_answer` 为空 | 163 | 2.2% | 无法从 CoT 中提取到任何数值答案 |
 | `final_answer` 非数值 | 16 | 0.2% | 提取到了内容但含字母/符号，非合法数值 |
+
+#### MATH 错误分布
+
+| 错误类别 | 数量 | 占比 | 说明 |
+|----------|------|------|------|
+| 非空但比对不匹配 | 2,526 | 22.5% | 提取到了答案但与 ground-truth 字符串不匹配 |
+| `final_answer` 为空 | 3,381 | 30.1% | 无 `\boxed{}` 且 `**Answer:**` 回退失败 |
+| 非空但比对正确 | 5,341 | 47.5% | 正确提取 |
 
 #### 主要错误原因
 
@@ -442,37 +568,44 @@ python filter.py -i data/gsm8k_train_cot.jsonl -o data/gsm8k_train_cot_filtered.
 - 题目要求计算两个量的**总数**，但模型将其理解为分别给出两个量的值，导致 `final_answer` 出现多值（如 `64 32`）
 - 题目中的条件关系被模型反向解读，导致推理方向错误
 
-此类问题既反映在 16 条非数值样本（多值输出）中，也是 996 条合法数值但答案错误的主要来源之一。
+此类问题既反映在 GSM8K 16 条非数值样本（多值输出）中，也是 996 条合法数值但答案错误的主要来源之一。
 
 **2. Token 上限截断**
 
 Teacher model 生成时 `max_new_tokens=2048`，但部分题目中模型在推理过程中出现反复验证、循环推敲（"反复横跳"），在触及 token 上限前未能完成推理并给出 `\boxed{}`，导致：
 - CoT 末尾缺失 `\boxed{}` 标记
 - 推理链不完整，无法通过 `**Answer:**` 回退提取
-- 最终 `final_answer` 为空（163 条空值的主要来源）
+- 最终 `final_answer` 为空
 
 **3. 大模型引入未知变量**
 
-在部分需要设未知数列方程求解的题目中，模型习惯性地使用变量（如 `x`、`C`、`J`、`Y`、`L`、`F`）表示某个中间量，但最终未将变量具体数值代入 `\boxed{}`，而是将含字母的表达式直接作为答案输出，例如：
-- `3x`、`6x - 3`（代数表达式）
-- `3C + 15`、`Y + 46`、`3L + 60`（带变量的数值表达式）
-- `2J`、`-7F`（变量与数值混合）
+在部分需要设未知数列方程求解的题目中，模型习惯性地使用变量（如 `x`、`C`、`J`）表示某个中间量，但最终未将变量具体数值代入 `\boxed{}`，而是将含字母的表达式直接作为答案输出。
 
-此类问题占 16 条非数值样本中的 9 条，是 `final_answer` 非数值的主要原因。
+**4. MATH 特有的格式问题**
+
+- **不使用 `\boxed{}`**：MATH 空答案率（30.1%）远高于 GSM8K（2.2%），teacher model 在 MATH 题目中更倾向自然语言收尾
+- **答案形式多样**：代数表达式、LaTeX 分数、坐标、日期等非纯数值形式，字符串比对要求精确匹配，细微格式差异即判错
+- **推理能力不足**：Level 5 难题有效准确率仅 63.0%，模型在高级代数、微积分等领域的推理质量有限
 
 ### 相关文件
 
 ```
 basic/
 ├── data/
-│   ├── gsm8k_train_cot.jsonl              # 输入：Teacher 生成的 CoT
-│   ├── gsm8k_train_cot_filtered.jsonl     # 输出：追加 final_answer 字段（全部样本）
-│   ├── gsm8k_train_cot_correct.jsonl      # 输出：比对正确的样本（student 训练集，6,298 条）
-│   ├── gsm8k_train_cot_incorrect.jsonl    # 输出：合法数值但比对错误的样本
-│   ├── gsm8k_train_cot_bad.jsonl          # 输出：final_answer 为空或非数值的样本
-│   └── gsm8k_comparison_report.txt        # 输出：答案比对统计报告
+│   ├── gsm8k_train_cot.jsonl              # 输入：Teacher 生成的 CoT（GSM8K）
+│   ├── gsm8k_train_cot_filtered.jsonl     # 输出：追加 final_answer 字段（GSM8K 全部样本）
+│   ├── gsm8k_train_cot_correct.jsonl      # 输出：GSM8K 比对正确的样本（6,298 条）
+│   ├── gsm8k_train_cot_incorrect.jsonl    # 输出：GSM8K 合法数值但比对错误的样本
+│   ├── gsm8k_train_cot_bad.jsonl          # 输出：GSM8K final_answer 为空的样本
+│   ├── gsm8k_comparison_report.txt        # 输出：GSM8K 答案比对统计报告
+│   ├── math_train_cot.jsonl               # 输入：Teacher 生成的 CoT（MATH）
+│   ├── math_train_cot_filtered.jsonl      # 输出：追加 final_answer 字段（MATH 全部样本）
+│   ├── math_train_cot_correct.jsonl       # 输出：MATH 比对正确的样本（5,341 条）
+│   ├── math_train_cot_incorrect.jsonl     # 输出：MATH 非空但比对错误的样本
+│   ├── math_train_cot_bad.jsonl           # 输出：MATH final_answer 为空的样本
+│   ├── math_comparison_report.txt         # 输出：MATH 答案比对统计报告
+│   └── math_empty_answer_problems.txt     # 输出：MATH 空答案题目详情
 ├── filter.py                               # Boxed 提取 + 答案清洗 + 比对 + 训练集输出脚本
-├── filter_bad_answers.py                   # 不合格答案分离脚本
 └── README.md
 ```
 
@@ -482,5 +615,6 @@ basic/
 
 | 阶段 | 说明 |
 |------|------|
-| Student Fine-tune | 用 `data/gsm8k_train_cot_correct.jsonl`（6,298 条正确 CoT 数据）对较小的 student model 进行监督微调（SFT） |
+| Student Fine-tune | 用 `data/gsm8k_train_cot_correct.jsonl`（6,298 条）和 `data/math_train_cot_correct.jsonl`（5,341 条）正确 CoT 数据对较小的 student model 进行监督微调（SFT） |
 | 测试评估 | 在 `data/gsm8k_test.jsonl` 和 `data/math_test.jsonl` 上评估微调后的 student model 准确率，并与 teacher / 未微调 baseline 对比 |
+| 准确率提升 | 探索改进 teacher model 生成质量（更好的 prompt、更大的模型、增加生成长度），以降低 MATH 30.1% 的空答案率和提升整体正确率 |
