@@ -145,33 +145,28 @@ def extract_answer_fallback(text):
     return ""
 
 
-def clean_final_answer(text):
+def clean_final_answer(text, math_mode=False):
     """Remove units, formatting, and LaTeX artifacts from extracted boxed content.
 
-    Steps (in order):
-    1. Remove \\text{...} blocks (units like "hours", "minutes", "pounds")
-    2. Remove \\overline{...} — keep inner content (repeating decimal notation)
-    3. Convert \\dfrac{a}{b} and \\frac{a}{b} to a/b
-    4. Remove \\,, \\!, \\$, \\%, ^{\\circ}, \\circ, $, % (formatting)
-    5. Remove commas between digits (1,000 → 1000)
-    6. Collapse whitespace
+    In math_mode, preserves algebraic notation and LaTeX commands (frac, exponents).
     """
     if not text:
         return text
 
-    # 1. Remove \text{...} blocks (units: hours, minutes, pounds, etc.)
-    text = _remove_balanced_blocks(text, r'\text{')
+    # 1. Remove \text{...} blocks — in math mode keep inner content
+    text = _remove_balanced_blocks(text, r'\text{', keep_content=math_mode)
 
     # 2. Remove \overline{...} — keep the inner number
     text = _remove_balanced_blocks(text, r'\overline{', keep_content=True)
 
-    # 3. Convert \dfrac and \frac
-    text = _extract_frac(text, r'\dfrac')
-    text = _extract_frac(text, r'\frac')
+    if not math_mode:
+        # 3. Convert \dfrac and \frac
+        text = _extract_frac(text, r'\dfrac')
+        text = _extract_frac(text, r'\frac')
 
-    # 4. Remove \begin{aligned}...\end{aligned} (failed extractions)
-    text = _remove_balanced_blocks(text, r'\begin{')
-    text = _remove_balanced_blocks(text, r'\end{')
+        # 4. Remove \begin{aligned}...\end{aligned} (failed extractions)
+        text = _remove_balanced_blocks(text, r'\begin{')
+        text = _remove_balanced_blocks(text, r'\end{')
 
     # 5. Remove LaTeX formatting
     text = text.replace('\\,', '')       # thin space
@@ -185,22 +180,25 @@ def clean_final_answer(text):
     text = text.replace('\\\\', '')      # line breaks from aligned env
     text = text.replace('£', '')         # pound sterling
     text = text.replace('€', '')         # euro
-    text = re.sub(r'\^[234]', '', text)  # superscript ^2, ^3, ^4
-    text = text.replace('²', '').replace('³', '')  # unicode superscripts
+    if not math_mode:
+        text = re.sub(r'\^[234]', '', text)  # superscript ^2, ^3, ^4
+        text = text.replace('²', '').replace('³', '')  # unicode superscripts
 
     # 6. Remove commas between digits (1,000 → 1000)
     text = re.sub(r'(?<=\d),(?=\d)', '', text)
 
-    # 7. Remove remaining backslashes
-    text = text.replace('\\', '')
+    if not math_mode:
+        # 7. Remove remaining backslashes
+        text = text.replace('\\', '')
 
     # 8. Collapse multiple spaces and strip
     text = re.sub(r'\s+', ' ', text).strip()
 
     # 9. Normalize time format: "07:30" → "730", "9:00" → "900"
-    m = re.match(r'^0?(\d{1,2}):(\d{2})$', text)
-    if m:
-        text = f"{int(m.group(1))}{m.group(2)}"
+    if not math_mode:
+        m = re.match(r'^0?(\d{1,2}):(\d{2})$', text)
+        if m:
+            text = f"{int(m.group(1))}{m.group(2)}"
 
     return text
 
@@ -216,17 +214,71 @@ def extract_last_number_fallback(text):
     return numbers[-1][0]
 
 
-def filter_data(input_path, output_path):
+_MONTHS = (
+    r'January|February|March|April|May|June|'
+    r'July|August|September|October|November|December|'
+    r'Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec'
+)
+
+
+def extract_answer_math_fallback(text):
+    """Math mode fallback: when no \\boxed{}, extract the answer after
+    **Answer:**. Handles dates (June 20th → June 20), fractions (4/5 → \\frac{4}{5}),
+    and plain numbers."""
+    marker_match = re.search(r'\*\*Answer:?\*\*\s*:?\s*', text)
+    if not marker_match:
+        return ""
+
+    answer_text = text[marker_match.end():].strip()
+
+    # 1. Check for date: month name followed by a number (possibly with ordinal)
+    date_m = re.match(
+        rf'({_MONTHS})\s+(\d{{1,2}})(?:st|nd|rd|th)?\b',
+        answer_text, re.IGNORECASE
+    )
+    if date_m:
+        month = date_m.group(1).capitalize()
+        day = date_m.group(2)
+        return f'{month} {day}'
+
+    # 2. Match first number-like expression: integer, decimal, or fraction a/b
+    m = re.search(r'\d+(?:\.\d+)?(?:/\d+(?:\.\d+)?)?', answer_text)
+    if not m:
+        return ""
+
+    raw = m.group()
+    # Convert a/b to \frac{a}{b}
+    if '/' in raw:
+        parts = raw.split('/')
+        raw = f'\\frac{{{parts[0]}}}{{{parts[1]}}}'
+
+    return raw
+
+
+def filter_data(input_path, output_path, math_mode=False, bad_output_path=None):
+    bad_entries = []
     with open(input_path, 'r') as fin, open(output_path, 'w') as fout:
         for line in fin:
             data = json.loads(line.strip())
             raw_boxed = extract_boxed(data['answer'])
-            if not raw_boxed:
-                raw_boxed = extract_answer_fallback(data['answer'])
-            if not raw_boxed:
-                raw_boxed = extract_last_number_fallback(data['answer'])
-            data['final_answer'] = clean_final_answer(raw_boxed)
+            if math_mode:
+                if not raw_boxed:
+                    raw_boxed = extract_answer_math_fallback(data['answer'])
+            else:
+                if not raw_boxed:
+                    raw_boxed = extract_answer_fallback(data['answer'])
+                if not raw_boxed:
+                    raw_boxed = extract_last_number_fallback(data['answer'])
+            data['final_answer'] = clean_final_answer(raw_boxed, math_mode=math_mode)
+            if bad_output_path is not None and not data['final_answer']:
+                bad_entries.append(data)
             fout.write(json.dumps(data, ensure_ascii=False) + '\n')
+
+    if bad_output_path and bad_entries:
+        with open(bad_output_path, 'w') as f:
+            for entry in bad_entries:
+                f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+        print(f"Empty final_answer entries: {len(bad_entries)} -> {bad_output_path}")
 
     print(f"Processed {input_path} -> {output_path}")
 
@@ -262,14 +314,59 @@ def normalize_number(text):
         return None
 
 
+def _category_stats():
+    """Return a fresh stats dict for one category (type or level)."""
+    return {'total': 0, 'empty': 0, 'non_numeric': 0, 'valid': 0, 'correct': 0}
+
+
+def _update_stats(stats, is_empty, is_non_numeric, is_correct):
+    """Update a stats dict with one sample's outcome."""
+    stats['total'] += 1
+    if is_empty:
+        stats['empty'] += 1
+    elif is_non_numeric:
+        stats['non_numeric'] += 1
+    else:
+        stats['valid'] += 1
+        if is_correct:
+            stats['correct'] += 1
+
+
+def _format_category_report(cat_stats, cat_name, math_mode=False):
+    """Format per-category breakdown for the report."""
+    lines = [f"  By {cat_name}:"]
+    for value in sorted(cat_stats.keys()):
+        s = cat_stats[value]
+        acc = s['correct'] / s['total'] * 100 if s['total'] > 0 else 0.0
+        vac = s['correct'] / s['valid'] * 100 if s['valid'] > 0 else 0.0
+        if math_mode:
+            lines.append(
+                f"    {value:12s}  total={s['total']:5d}  empty={s['empty']:4d}  "
+                f"valid={s['valid']:5d}  correct={s['correct']:5d}  "
+                f"acc={acc:5.1f}%  v_acc={vac:5.1f}%"
+            )
+        else:
+            lines.append(
+                f"    {value:12s}  total={s['total']:5d}  empty={s['empty']:4d}  "
+                f"non_num={s['non_numeric']:4d}  valid={s['valid']:5d}  "
+                f"correct={s['correct']:5d}  acc={acc:5.1f}%  v_acc={vac:5.1f}%"
+            )
+    return '\n'.join(lines)
+
+
+def _normalize_answer(text):
+    """Normalize answer text for string comparison: collapse whitespace, strip."""
+    return re.sub(r'\s+', ' ', text).strip()
+
+
 def compare_with_ground_truth(filtered_path, ground_truth_path, report_path,
                               incorrect_output_path=None,
-                              correct_output_path=None):
+                              correct_output_path=None,
+                              math_mode=False):
     """Compare final_answer from filtered file with ground truth answers.
 
-    Reads two JSONL files line-by-line (must be same order), compares each
-    final_answer against the ground truth answer, and writes a statistics
-    report.  Optionally writes correct / incorrect entries to separate files.
+    In math_mode, treats all non-empty answers as valid and uses string
+    comparison (with whitespace normalization) instead of numeric comparison.
     """
     total = 0
     empty = 0
@@ -278,6 +375,11 @@ def compare_with_ground_truth(filtered_path, ground_truth_path, report_path,
     correct = 0
     incorrect_entries = []
     correct_entries = []
+
+    has_type = False
+    has_level = False
+    type_stats = {}
+    level_stats = {}
 
     with open(filtered_path, 'r') as f_filt, \
          open(ground_truth_path, 'r') as f_gt:
@@ -289,41 +391,109 @@ def compare_with_ground_truth(filtered_path, ground_truth_path, report_path,
             fa = data_f.get('final_answer', '').strip()
             gt = data_g.get('answer', '').strip()
 
-            if not fa:
+            sample_type = str(data_f.get('type', ''))
+            sample_level = str(data_f.get('level', ''))
+
+            if sample_type:
+                has_type = True
+                type_stats.setdefault(sample_type, _category_stats())
+            if sample_level:
+                has_level = True
+                level_stats.setdefault(sample_level, _category_stats())
+
+            is_empty = not fa
+            if math_mode:
+                is_non_numeric = False
+            else:
+                is_non_numeric = not is_empty and not is_valid_numeric(fa)
+            is_correct = False
+
+            if is_empty:
                 empty += 1
-                continue
-
-            if not is_valid_numeric(fa):
+            elif is_non_numeric:
                 non_numeric += 1
-                continue
+            else:
+                valid += 1
 
-            valid += 1
-
-            fa_val = normalize_number(fa)
-            gt_val = normalize_number(gt)
-
-            if fa_val is not None and gt_val is not None:
-                if abs(fa_val - gt_val) < 1e-9:
-                    correct += 1
-                    correct_entries.append({
-                        'problem': data_f['problem'],
-                        'answer': data_f['answer'],
-                        'final_answer': fa,
-                        'ground_truth': gt
-                    })
+                if math_mode:
+                    if _normalize_answer(fa) == _normalize_answer(gt):
+                        correct += 1
+                        is_correct = True
+                        entry = {
+                            'problem': data_f['problem'],
+                            'answer': data_f['answer'],
+                            'final_answer': fa,
+                            'ground_truth': gt
+                        }
+                        for key in ('type', 'level'):
+                            if key in data_f:
+                                entry[key] = data_f[key]
+                        correct_entries.append(entry)
+                    else:
+                        entry = {
+                            'problem': data_f['problem'],
+                            'teacher_answer': data_f['answer'],
+                            'final_answer': fa,
+                            'ground_truth': gt
+                        }
+                        for key in ('type', 'level'):
+                            if key in data_f:
+                                entry[key] = data_f[key]
+                        incorrect_entries.append(entry)
                 else:
-                    incorrect_entries.append({
-                        'problem': data_f['problem'],
-                        'teacher_answer': data_f['answer'],
-                        'final_answer': fa,
-                        'ground_truth': gt
-                    })
+                    fa_val = normalize_number(fa)
+                    gt_val = normalize_number(gt)
+
+                    if fa_val is not None and gt_val is not None:
+                        if abs(fa_val - gt_val) < 1e-9:
+                            correct += 1
+                            is_correct = True
+                            entry = {
+                                'problem': data_f['problem'],
+                                'answer': data_f['answer'],
+                                'final_answer': fa,
+                                'ground_truth': gt
+                            }
+                            for key in ('type', 'level'):
+                                if key in data_f:
+                                    entry[key] = data_f[key]
+                            correct_entries.append(entry)
+                        else:
+                            entry = {
+                                'problem': data_f['problem'],
+                                'teacher_answer': data_f['answer'],
+                                'final_answer': fa,
+                                'ground_truth': gt
+                            }
+                            for key in ('type', 'level'):
+                                if key in data_f:
+                                    entry[key] = data_f[key]
+                            incorrect_entries.append(entry)
+
+            if sample_type:
+                _update_stats(type_stats[sample_type], is_empty, is_non_numeric, is_correct)
+            if sample_level:
+                _update_stats(level_stats[sample_level], is_empty, is_non_numeric, is_correct)
 
     incorrect_count = valid - correct
     accuracy = correct / total if total > 0 else 0.0
     valid_accuracy = correct / valid if valid > 0 else 0.0
 
-    report = f"""GSM8K Final Answer Comparison Report
+    if math_mode:
+        report = f"""MATH Final Answer Comparison Report
+================================
+
+Total samples:               {total}
+  - Empty final_answer:      {empty}   ({empty/total*100:.1f}%)
+  - Valid (non-empty):       {valid}   ({valid/total*100:.1f}%)
+    - Correct:               {correct}   ({correct/total*100:.1f}%)
+    - Incorrect:             {incorrect_count}    ({incorrect_count/total*100:.1f}%)
+
+Accuracy (correct / total):          {accuracy*100:.2f}%
+Accuracy (correct / valid):          {valid_accuracy*100:.2f}%
+"""
+    else:
+        report = f"""GSM8K Final Answer Comparison Report
 ================================
 
 Total samples:               {total}
@@ -336,6 +506,11 @@ Total samples:               {total}
 Accuracy (correct / total):          {accuracy*100:.2f}%
 Accuracy (correct / valid numeric):  {valid_accuracy*100:.2f}%
 """
+
+    if has_type:
+        report += '\n' + _format_category_report(type_stats, 'type', math_mode) + '\n'
+    if has_level:
+        report += '\n' + _format_category_report(level_stats, 'level', math_mode) + '\n'
 
     with open(report_path, 'w') as f:
         f.write(report)
@@ -364,12 +539,12 @@ if __name__ == '__main__':
     )
     parser.add_argument(
         '--input', '-i',
-        default='data/gsm8k_train_cot.jsonl',
+        default=None,
         help='Input jsonl file path'
     )
     parser.add_argument(
         '--output', '-o',
-        default='data/gsm8k_train_cot_filtered.jsonl',
+        default=None,
         help='Output jsonl file path'
     )
     parser.add_argument(
@@ -379,7 +554,7 @@ if __name__ == '__main__':
     )
     parser.add_argument(
         '--report', '-r',
-        default='data/gsm8k_comparison_report.txt',
+        default=None,
         help='Path for comparison report output'
     )
     parser.add_argument(
@@ -392,8 +567,20 @@ if __name__ == '__main__':
         default=None,
         help='If set, write correct entries (student training set) to this JSONL file'
     )
+    parser.add_argument(
+        '--math', action='store_true',
+        default=False,
+        help='MATH dataset mode: only extract \\boxed{} content, skip numeric fallbacks'
+    )
+    parser.add_argument(
+        '--bad_output', '-b',
+        default=None,
+        help='If set, write entries with empty final_answer to this JSONL file'
+    )
     args = parser.parse_args()
-    filter_data(args.input, args.output)
+    filter_data(args.input, args.output, math_mode=args.math,
+                bad_output_path=args.bad_output)
     if args.ground_truth:
         compare_with_ground_truth(args.output, args.ground_truth, args.report,
-                                  args.incorrect_output, args.correct_output)
+                                  args.incorrect_output, args.correct_output,
+                                  math_mode=args.math)
