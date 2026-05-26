@@ -359,15 +359,34 @@ def _normalize_answer(text):
     return re.sub(r'\s+', ' ', text).strip()
 
 
+def _load_ground_truth(gt_path):
+    """Load ground truth into a dict: problem_text -> answer."""
+    gt_map = {}
+    with open(gt_path, encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            rec = json.loads(line)
+            gt_map[rec['problem']] = rec['answer']
+    return gt_map
+
+
 def compare_with_ground_truth(filtered_path, ground_truth_path, report_path,
                               incorrect_output_path=None,
                               correct_output_path=None,
                               math_mode=False):
     """Compare final_answer from filtered file with ground truth answers.
 
+    Matches by problem text (not line index), so the filtered file may have
+    multiple answers per problem (e.g. after deduplication).
+
     In math_mode, treats all non-empty answers as valid and uses string
     comparison (with whitespace normalization) instead of numeric comparison.
     """
+    gt_map = _load_ground_truth(ground_truth_path)
+    print(f"Loaded {len(gt_map)} ground-truth entries from {ground_truth_path}")
+
     total = 0
     empty = 0
     non_numeric = 0
@@ -381,15 +400,21 @@ def compare_with_ground_truth(filtered_path, ground_truth_path, report_path,
     type_stats = {}
     level_stats = {}
 
-    with open(filtered_path, 'r') as f_filt, \
-         open(ground_truth_path, 'r') as f_gt:
-        for line_f, line_g in zip(f_filt, f_gt):
+    # Per-problem tracking
+    problem_samples = {}   # problem -> list of is_correct booleans
+    missing_gt = set()
+
+    with open(filtered_path, 'r') as f_filt:
+        for line_f in f_filt:
             total += 1
             data_f = json.loads(line_f.strip())
-            data_g = json.loads(line_g.strip())
 
+            problem = data_f['problem']
             fa = data_f.get('final_answer', '').strip()
-            gt = data_g.get('answer', '').strip()
+            gt = gt_map.get(problem)
+
+            if gt is None:
+                missing_gt.add(problem)
 
             sample_type = str(data_f.get('type', ''))
             sample_level = str(data_f.get('level', ''))
@@ -415,41 +440,13 @@ def compare_with_ground_truth(filtered_path, ground_truth_path, report_path,
             else:
                 valid += 1
 
-                if math_mode:
-                    if _normalize_answer(fa) == _normalize_answer(gt):
-                        correct += 1
-                        is_correct = True
-                        entry = {
-                            'problem': data_f['problem'],
-                            'answer': data_f['answer'],
-                            'final_answer': fa,
-                            'ground_truth': gt
-                        }
-                        for key in ('type', 'level'):
-                            if key in data_f:
-                                entry[key] = data_f[key]
-                        correct_entries.append(entry)
-                    else:
-                        entry = {
-                            'problem': data_f['problem'],
-                            'teacher_answer': data_f['answer'],
-                            'final_answer': fa,
-                            'ground_truth': gt
-                        }
-                        for key in ('type', 'level'):
-                            if key in data_f:
-                                entry[key] = data_f[key]
-                        incorrect_entries.append(entry)
-                else:
-                    fa_val = normalize_number(fa)
-                    gt_val = normalize_number(gt)
-
-                    if fa_val is not None and gt_val is not None:
-                        if abs(fa_val - gt_val) < 1e-9:
+                if gt is not None:
+                    if math_mode:
+                        if _normalize_answer(fa) == _normalize_answer(gt):
                             correct += 1
                             is_correct = True
                             entry = {
-                                'problem': data_f['problem'],
+                                'problem': problem,
                                 'answer': data_f['answer'],
                                 'final_answer': fa,
                                 'ground_truth': gt
@@ -460,7 +457,7 @@ def compare_with_ground_truth(filtered_path, ground_truth_path, report_path,
                             correct_entries.append(entry)
                         else:
                             entry = {
-                                'problem': data_f['problem'],
+                                'problem': problem,
                                 'teacher_answer': data_f['answer'],
                                 'final_answer': fa,
                                 'ground_truth': gt
@@ -469,54 +466,109 @@ def compare_with_ground_truth(filtered_path, ground_truth_path, report_path,
                                 if key in data_f:
                                     entry[key] = data_f[key]
                             incorrect_entries.append(entry)
+                    else:
+                        fa_val = normalize_number(fa)
+                        gt_val = normalize_number(gt)
+
+                        if fa_val is not None and gt_val is not None:
+                            if abs(fa_val - gt_val) < 1e-9:
+                                correct += 1
+                                is_correct = True
+                                entry = {
+                                    'problem': problem,
+                                    'answer': data_f['answer'],
+                                    'final_answer': fa,
+                                    'ground_truth': gt
+                                }
+                                for key in ('type', 'level'):
+                                    if key in data_f:
+                                        entry[key] = data_f[key]
+                                correct_entries.append(entry)
+                            else:
+                                entry = {
+                                    'problem': problem,
+                                    'teacher_answer': data_f['answer'],
+                                    'final_answer': fa,
+                                    'ground_truth': gt
+                                }
+                                for key in ('type', 'level'):
+                                    if key in data_f:
+                                        entry[key] = data_f[key]
+                                incorrect_entries.append(entry)
 
             if sample_type:
                 _update_stats(type_stats[sample_type], is_empty, is_non_numeric, is_correct)
             if sample_level:
                 _update_stats(level_stats[sample_level], is_empty, is_non_numeric, is_correct)
 
+            # Track per-problem
+            if problem not in problem_samples:
+                problem_samples[problem] = []
+            problem_samples[problem].append(is_correct)
+
+    # ---- Problem-level summary ----
+    n_problems = len(problem_samples)
+    problems_all_correct = 0
+    problems_any_correct = 0
+    problems_none_correct = 0
+    for p, samples in problem_samples.items():
+        if p not in gt_map:
+            continue
+        if all(samples):
+            problems_all_correct += 1
+        if any(samples):
+            problems_any_correct += 1
+        else:
+            problems_none_correct += 1
+
+    n_with_gt = n_problems - len(missing_gt)
+
+    # ---- Report ----
     incorrect_count = valid - correct
-    accuracy = correct / total if total > 0 else 0.0
-    valid_accuracy = correct / valid if valid > 0 else 0.0
+    accuracy = correct / total * 100 if total > 0 else 0.0
+    valid_accuracy = correct / valid * 100 if valid > 0 else 0.0
 
     if math_mode:
-        report = f"""MATH Final Answer Comparison Report
-================================
-
-Total samples:               {total}
-  - Empty final_answer:      {empty}   ({empty/total*100:.1f}%)
-  - Valid (non-empty):       {valid}   ({valid/total*100:.1f}%)
-    - Correct:               {correct}   ({correct/total*100:.1f}%)
-    - Incorrect:             {incorrect_count}    ({incorrect_count/total*100:.1f}%)
-
-Accuracy (correct / total):          {accuracy*100:.2f}%
-Accuracy (correct / valid):          {valid_accuracy*100:.2f}%
-"""
+        header = "MATH Final Answer Comparison Report"
     else:
-        report = f"""GSM8K Final Answer Comparison Report
-================================
+        header = "GSM8K Final Answer Comparison Report"
 
+    report = f"""{header}
+{'=' * len(header)}
+
+--- Sample-level ---
 Total samples:               {total}
   - Empty final_answer:      {empty}   ({empty/total*100:.1f}%)
   - Non-numeric final_answer:{non_numeric}    ({non_numeric/total*100:.1f}%)
-  - Valid numeric:           {valid}   ({valid/total*100:.1f}%)
+  - Valid:                   {valid}   ({valid/total*100:.1f}%)
     - Correct:               {correct}   ({correct/total*100:.1f}%)
     - Incorrect:             {incorrect_count}    ({incorrect_count/total*100:.1f}%)
 
-Accuracy (correct / total):          {accuracy*100:.2f}%
-Accuracy (correct / valid numeric):  {valid_accuracy*100:.2f}%
+Accuracy (correct / total):          {accuracy:.2f}%
+Accuracy (correct / valid):          {valid_accuracy:.2f}%
+
+--- Problem-level ---
+Unique problems in filtered output: {n_problems}
+  (ground-truth available for:       {n_with_gt})
+Problems with ALL answers correct:   {problems_all_correct}
+Problems with ANY answer correct:    {problems_any_correct}
+Problems with NO answer correct:     {problems_none_correct}
 """
+
+    if missing_gt:
+        report += f"\nWARNING: {len(missing_gt)} problems have no matching ground-truth entry.\n"
 
     if has_type:
         report += '\n' + _format_category_report(type_stats, 'type', math_mode) + '\n'
     if has_level:
         report += '\n' + _format_category_report(level_stats, 'level', math_mode) + '\n'
 
-    with open(report_path, 'w') as f:
-        f.write(report)
-
     print(report)
-    print(f"Report written to {report_path}")
+
+    if report_path:
+        with open(report_path, 'w') as f:
+            f.write(report)
+        print(f"Report written to {report_path}")
 
     if correct_output_path and correct_entries:
         with open(correct_output_path, 'w') as f:
