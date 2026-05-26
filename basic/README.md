@@ -364,7 +364,7 @@ python deduplicate_by_similarity.py data/gsm8k_train_cot.jsonl \
 
 | 数据集 | 低 T 输入 | 高 T 输入 | 去重后 | 丢弃 | 保留率 |
 |--------|-----------|-----------|--------|------|--------|
-| GSM8K | 7,473 | 7,473 | — | — | — |
+| GSM8K | 7,473 | 7,473 | 11,568 | 3,378 | 77.4% |
 | MATH | 11,248 | 5,087 | 14,700 | 1,635 | 90.0% |
 
 > MATH 高 temperature 生成时仅覆盖了部分 problem（5,087 条），因此两个文件长度不等。`deduplicate_by_similarity.py` 对配对范围外的 file1 剩余记录直接追加到输出。
@@ -645,15 +645,99 @@ MATH 总准确率显著低于 GSM8K，主要由两方面因素叠加：30.1% 的
 
 准确率随难度递增递减，Level 5 空答案率高达 54.8%，说明难题上 teacher model 更倾向于不输出 `\boxed{}`。
 
+##### 去重后比对结果（完整流水线）
+
+以下为经过多温度去重后（3.1.0）再送入 `filter.py` 进行 boxed 提取和答案比对的完整流水线结果。由于去重后每个 problem 可能有多条答案，比对采用 problem-text 匹配（而非逐行 zip），并额外提供 problem 级统计。
+
+**GSM8K 去重后比对：**
+
+| 统计项 | 数量 | 占比 |
+|--------|------|------|
+| 总样本 | 11,568 | 100% |
+| `final_answer` 为空 | 258 | 2.2% |
+| `final_answer` 非数值 | 37 | 0.3% |
+| `final_answer` 合法数值 | 11,273 | 97.4% |
+| **比对正确** | **9,508** | **82.2%** |
+
+| 准确率指标 | 值 |
+|-----------|------|
+| 样本级准确率（correct / total） | 82.19% |
+| 合法数值准确率（correct / valid） | 84.34% |
+
+| Problem 级统计 | 数值 |
+|---------------|------|
+| 唯一 problem 数 | 7,473 |
+| 全部答案均正确 | 5,893（78.9%） |
+| 至少一个答案正确 | 6,677（89.4%） |
+| 全部答案均错误 | 796（10.6%） |
+
+**MATH 去重后比对：**
+
+| 统计项 | 数量 | 占比 |
+|--------|------|------|
+| 总样本 | 14,700 | 100% |
+| `final_answer` 为空 | 4,695 | 31.9% |
+| `final_answer` 非空（valid） | 10,005 | 68.1% |
+| **比对正确** | **6,753** | **45.9%** |
+
+| 准确率指标 | 值 |
+|-----------|------|
+| 样本级准确率（correct / total） | 45.94% |
+| 非空答案准确率（correct / valid） | 67.50% |
+
+| Problem 级统计 | 数值 |
+|---------------|------|
+| 唯一 problem 数 | 11,248 |
+| 全部答案均正确 | 5,026（44.7%） |
+| 至少一个答案正确 | 5,662（50.3%） |
+| 全部答案均错误 | 5,586（49.7%） |
+
+**MATH 按类型与难度（去重后）：**
+
+| 类型 | 总数 | 空 | 有效 | 正确 | 准确率 | 有效准确率 |
+|------|------|-----|------|------|--------|------------|
+| Algebra | 3,377 | 356 | 3,021 | 2,216 | 65.6% | 73.4% |
+| Counting & Probability | 1,486 | 536 | 950 | 564 | 38.0% | 59.4% |
+| Geometry | 1,620 | 795 | 825 | 510 | 31.5% | 61.8% |
+| Intermediate Algebra | 2,602 | 1,375 | 1,227 | 729 | 28.0% | 59.4% |
+| Number Theory | 1,673 | 567 | 1,106 | 949 | 56.7% | 85.8% |
+| Prealgebra | 2,396 | 324 | 2,072 | 1,494 | 62.4% | 72.1% |
+| Precalculus | 1,546 | 742 | 804 | 291 | 18.8% | 36.2% |
+
+| 难度 | 总数 | 空 | 有效 | 正确 | 准确率 | 有效准确率 |
+|------|------|-----|------|------|--------|------------|
+| Level 1 | 1,152 | 95 | 1,057 | 824 | 71.5% | 78.0% |
+| Level 2 | 2,600 | 358 | 2,242 | 1,567 | 60.3% | 69.9% |
+| Level 3 | 3,165 | 691 | 2,474 | 1,656 | 52.3% | 66.9% |
+| Level 4 | 3,415 | 1,076 | 2,339 | 1,529 | 44.8% | 65.4% |
+| Level 5 | 4,366 | 2,475 | 1,891 | 1,175 | 26.9% | 62.1% |
+
+去重后 MATH 各类型的条目数不同于原始（3.1.5 单次采样结果），因为高 temperature 生成仅覆盖了部分 problem（5,087 条），分布不完全均匀。Number Theory 有效准确率最高（85.8%），Precalculus 最低（36.2%），趋势与单次采样一致。
+
+**去重前后对比：**
+
+| 数据集 | 指标 | 单次采样 (T=0.6) | 去重后 (T=0.6 + T=0.9) |
+|--------|------|------------------|------------------------|
+| GSM8K | 样本数 | 7,473 | 11,568 |
+| GSM8K | 正确数 | 6,298 | 9,508 |
+| GSM8K | 样本准确率 | 84.28% | 82.19% |
+| GSM8K | Problem 覆盖（≥1 正确） | — | 89.4%（6,677/7,473） |
+| MATH | 样本数 | 11,248 | 14,700 |
+| MATH | 正确数 | 5,341 | 6,753 |
+| MATH | 样本准确率 | 47.48% | 45.94% |
+| MATH | Problem 覆盖（≥1 正确） | — | 50.3%（5,662/11,248） |
+
+去重后样本准确率略降（GSM8K: -2.1%, MATH: -1.5%），这是因为高 temperature 引入的额外样本准确率偏低，拉低了整体均值。但 problem 级覆盖率显著提升——GSM8K 至少有一个正确答案的 problem 从原先单次采样的 ~84.3% 提升到 89.4%，MATH 从单次采样的 47.5% 覆盖到 50.3% 的 problem。这些额外覆盖的 problem 为 student model 提供了更多学习样本。
+
 ##### 输出文件
 
-| 参数 | 输出文件 | 内容 | GSM8K | MATH |
-|------|----------|------|-------|------|
-| `-o` | `*_filtered.jsonl` | 全部样本（追加 `final_answer` 字段） | 7,473 | 11,248 |
-| `-c` | `*_correct.jsonl` | **比对正确的样本（student 训练集）** | 6,298 | 5,341 |
-| `-w` | `*_incorrect.jsonl` | 非空但比对错误的样本 | 996 | 2,526 |
-| `-b` | `*_bad.jsonl` | `final_answer` 为空的样本 | 163 | 3,381 |
-| `-r` | `*_report.txt` | 比对统计报告 | — | — |
+| 参数 | 输出文件 | 内容 | GSM8K（单次） | MATH（单次） | GSM8K（去重后） | MATH（去重后） |
+|------|----------|------|-------|------|-------|------|
+| `-o` | `*_filtered.jsonl` | 全部样本（追加 `final_answer` 字段） | 7,473 | 11,248 | 11,568 | 14,700 |
+| `-c` | `*_correct.jsonl` | **比对正确的样本（student 训练集）** | 6,298 | 5,341 | 9,508 | 6,753 |
+| `-w` | `*_incorrect.jsonl` | 非空但比对错误的样本 | 996 | 2,526 | 1,765 | 3,252 |
+| `-b` | `*_bad.jsonl` | `final_answer` 为空的样本 | 163 | 3,381 | 258 | 4,695 |
+| `-r` | `*_report.txt` | 比对统计报告 | — | — | — | — |
 
 #### 3.1.6 原因分析
 
@@ -725,7 +809,19 @@ basic/
 │   ├── math_train_cot_incorrect.jsonl     # 输出：MATH 非空但比对错误的样本
 │   ├── math_train_cot_bad.jsonl           # 输出：MATH final_answer 为空的样本
 │   ├── math_comparison_report.txt         # 输出：MATH 答案比对统计报告
-│   └── math_empty_answer_problems.txt     # 输出：MATH 空答案题目详情
+│   ├── math_empty_answer_problems.txt     # 输出：MATH 空答案题目详情
+│   ├── gsm8k_train_cot_dedup.jsonl        # 输入：GSM8K 去重后数据
+│   ├── gsm8k_train_cot_dedup_filtered.jsonl   # 输出：GSM8K 去重后追加 final_answer
+│   ├── gsm8k_train_cot_dedup_correct.jsonl    # 输出：GSM8K 去重后正确样本（9,508 条）
+│   ├── gsm8k_train_cot_dedup_incorrect.jsonl  # 输出：GSM8K 去重后错误样本
+│   ├── gsm8k_train_cot_dedup_bad.jsonl        # 输出：GSM8K 去重后空答案样本
+│   ├── gsm8k_dedup_comparison_report.txt      # 输出：GSM8K 去重后比对报告
+│   ├── math_train_cot_dedup.jsonl             # 输入：MATH 去重后数据
+│   ├── math_train_cot_dedup_filtered.jsonl    # 输出：MATH 去重后追加 final_answer
+│   ├── math_train_cot_dedup_correct.jsonl     # 输出：MATH 去重后正确样本（6,753 条）
+│   ├── math_train_cot_dedup_incorrect.jsonl   # 输出：MATH 去重后错误样本
+│   ├── math_train_cot_dedup_bad.jsonl         # 输出：MATH 去重后空答案样本
+│   └── math_dedup_comparison_report.txt       # 输出：MATH 去重后比对报告
 ├── filter.py                               # Boxed 提取 + 答案清洗 + 比对 + 训练集输出脚本
 ├── check_token_limit.py                    # Token 截断分析：统计 answer token 数，定位超限样本
 └── README.md
