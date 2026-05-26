@@ -1,0 +1,27 @@
+MATH Final Answer Comparison Report
+================================
+
+Total samples:               5087
+  - Empty final_answer:      1552   (30.5%)
+  - Valid (non-empty):       3535   (69.5%)
+    - Correct:               2396   (47.1%)
+    - Incorrect:             1139    (22.4%)
+
+Accuracy (correct / total):          47.10%
+Accuracy (correct / valid):          67.78%
+
+  By type:
+    Algebra       total= 1255  empty= 127  valid= 1128  correct=  822  acc= 65.5%  v_acc= 72.9%
+    Counting & Probability  total=  500  empty= 176  valid=  324  correct=  197  acc= 39.4%  v_acc= 60.8%
+    Geometry      total=  553  empty= 270  valid=  283  correct=  168  acc= 30.4%  v_acc= 59.4%
+    Intermediate Algebra  total=  857  empty= 456  valid=  401  correct=  243  acc= 28.4%  v_acc= 60.6%
+    Number Theory  total=  570  empty= 181  valid=  389  correct=  328  acc= 57.5%  v_acc= 84.3%
+    Prealgebra    total=  831  empty=  99  valid=  732  correct=  543  acc= 65.3%  v_acc= 74.2%
+    Precalculus   total=  521  empty= 243  valid=  278  correct=   95  acc= 18.2%  v_acc= 34.2%
+
+  By level:
+    Level 1       total=  421  empty=  34  valid=  387  correct=  314  acc= 74.6%  v_acc= 81.1%
+    Level 2       total=  897  empty= 117  valid=  780  correct=  542  acc= 60.4%  v_acc= 69.5%
+    Level 3       total= 1113  empty= 232  valid=  881  correct=  595  acc= 53.5%  v_acc= 67.5%
+    Level 4       total= 1168  empty= 343  valid=  825  correct=  541  acc= 46.3%  v_acc= 65.6%
+    Level 5       total= 1488  empty= 826  valid=  662  correct=  404  acc= 27.2%  v_acc= 61.0%
