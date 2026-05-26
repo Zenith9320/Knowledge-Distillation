@@ -1,0 +1,24 @@
+GSM8K Adaptive Final Answer Comparison Report
+=============================================
+
+--- Sample-level (total lines) ---
+Total samples:                       22419
+  - Empty final_answer:              433   (1.9%)
+  - Non-numeric final_answer:        55    (0.2%)
+  - Valid:                           21931   (97.8%)
+    - Correct:                       18916   (84.4%)
+    - Incorrect:                     3015    (13.4%)
+
+Sample-level accuracy (correct / total):          84.37%
+Sample-level accuracy (correct / valid):          86.25%
+
+--- Problem-level ---
+Unique problems in adaptive output: 7473
+  (ground-truth available for:      7473)
+Problems with ALL samples correct:  5557  (74.4%)*
+Problems with ANY sample correct:   6934  (92.8%)*
+Problems with NO samples correct:   539  (7.2%)*
+
+*percentages based on problems with ground-truth (7473)
+
+Avg samples per problem: 3.0
