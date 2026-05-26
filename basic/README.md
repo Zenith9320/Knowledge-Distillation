@@ -260,6 +260,174 @@ basic/
 
 ---
 
+## 第二步补充：多温度答案去重
+
+针对同一 problem 在不同 temperature（如 `temperature=0.6` 和 `temperature=0.9`）下生成的答案，部分 pair 语义高度相似——高 temperature 并未带来有意义的多样性，反而产生冗余数据。去重阶段通过 embedding + 余弦相似度识别这些近似重复的 pair，相似度过高的只保留其中一条，减少训练集冗余。
+
+### 实现思路
+
+| 步骤 | 说明 |
+|------|------|
+| 1. 加载数据 | 读取两个 JSONL 文件（同一 problem，不同 temperature 生成），逐一配对 |
+| 2. 文本编码 | 用 `sentence-transformers` 的 `all-MiniLM-L6-v2` 模型将每条 answer 编码为 384 维归一化向量 |
+| 3. 相似度计算 | 对每个 pair 的两个向量做点积，得到余弦相似度（向量已归一化） |
+| 4. 阈值过滤 | 相似度 > 阈值 → 仅保留 file1 的答案（视为近似重复）；相似度 ≤ 阈值 → 两者都保留 |
+| 5. 写入输出 | 将保留的答案逐行写入新的 JSONL 文件 |
+
+**为什么用 embedding 而不是 TF-IDF**：TF-IDF 仅做词级匹配，无法识别同义表达（如 "Natalia sold 48 clips" vs "Natalia sold clips to 48 friends"）。Sentence-BERT 的语义 embedding 能捕获 paraphrase，去重判断更准确。
+
+### 使用方法
+
+```bash
+# 默认阈值 0.92
+python deduplicate_by_similarity.py data/gsm8k_train_cot.jsonl \
+                                    data/gsm8k_train_cot_high_temp.jsonl \
+                                    -o data/gsm8k_train_cot_dedup.jsonl
+
+# 自定义阈值（更激进去重 → 设更低，更保守 → 设更高）
+python deduplicate_by_similarity.py data/gsm8k_train_cot.jsonl \
+                                    data/gsm8k_train_cot_high_temp.jsonl \
+                                    -o data/gsm8k_train_cot_dedup.jsonl \
+                                    -t 0.95
+
+# 使用更大的嵌入模型以获得更高精度
+python deduplicate_by_similarity.py data/gsm8k_train_cot.jsonl \
+                                    data/gsm8k_train_cot_high_temp.jsonl \
+                                    --model all-mpnet-base-v2
+```
+
+### 命令行参数
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `file1` | （必填） | 优先保留的 JSONL 文件（如低 temperature 版本） |
+| `file2` | （必填） | 第二个 JSONL 文件 |
+| `-o` / `--output` | `data/gsm8k_train_cot_dedup.jsonl` | 输出去重后的 JSONL |
+| `-t` / `--threshold` | `0.92` | 余弦相似度阈值，超过即视为重复 |
+| `--model` | `all-MiniLM-L6-v2` | SentenceTransformer 模型名称 |
+| `--batch-size` | `64` | 编码时的 batch size |
+
+### 输出文件
+
+| 文件 | 内容 |
+|------|------|
+| `data/gsm8k_train_cot_dedup.jsonl` | 去重后的合并数据（`problem` + `answer`） |
+
+输出始终包含 file1 的全部答案，file2 中仅保留与 file1 相似度 ≤ 阈值的答案。
+
+### 相关文件
+
+```
+basic/
+├── data/
+│   ├── gsm8k_train_cot.jsonl              # 输入：低 temperature CoT（file1）
+│   ├── gsm8k_train_cot_high_temp.jsonl    # 输入：高 temperature CoT（file2）
+│   └── gsm8k_train_cot_dedup.jsonl        # 输出去重后数据
+├── deduplicate_by_similarity.py            # 去重脚本
+└── README.md
+```
+
+---
+
+## 第二步补充（改进思路）：自适应采样生成
+
+> **注意**：本节为改进思路，尚未实际执行。
+
+同一 problem 并非都需要同样的采样策略——简单题低温一次即可得出正确答案，难题才需要高温多采样来探索不同的推理路径。自适应采样的目标是根据模型的生成过程自身体现的"确定程度"，按需分配采样算力。
+
+### 实现思路
+
+| 阶段 | 说明 |
+|------|------|
+| Round 1 | 全部 problem，低温（`T=0.3`）使用 `n_low=3` 生成 3 个候选答案 |
+| 置信度评估 | 纯 logprob 驱动——计算每条生成序列的 per-token 平均 log 概率，若任意一条的均值 ≥ 阈值则高置信度 |
+| Round 2+ | 迭代式：仅低置信度 problem，高温（`T=0.9`）每轮追加 `n_per_iter=2` 次采样，采样后重新评估，达标即退出，最多 `max_iters=4` 轮 |
+| 输出合并 | 所有候选答案写入同一 JSONL，带 `temperature`、`round`、`sample_idx` 标签，后续由 filter.py 统一处理 |
+
+**置信度模型 — 为什么用 logprob 而不是自洽性投票**：
+
+1. **零额外开销**：vLLM 的 `SamplingParams(logprobs=1)` 在生成每个 token 的同时顺带返回其 log 概率，不增加任何计算量。
+2. **与下游解耦**：`\boxed{}` 提取和答案比对是 `filter.py` 的职责，自适应采样不应越俎代庖。logprob 纯粹衡量"模型对自己输出文本的确定程度"，与答案正确性无关。
+3. **更直接的信号**：低平均 logprob 意味着模型在生成时就在多个 token 选项之间摇摆，这正是"不确定性"的直接度量，比事后比对答案更早感知。
+
+**迭代式 Round 2 的优势**：每个低置信度 problem 单独追踪置信度变化，一旦某轮追加采样后达到阈值就停止，避免对已经找到高置信度推理路径的 problem 继续浪费采样。例如 300 个低置信度 problem 可能第 1 轮就有 200 个达标，仅剩 100 个继续下一轮。
+
+### 使用方法（预期）
+
+```bash
+# 默认参数运行
+python generate_CoT_adaptive.py
+
+# 仅测试 GSM8K，限制 20 条
+python generate_CoT_adaptive.py --dataset gsm8k --max_samples 20
+
+# 自定义迭代策略：低温保守、高温激进、最多迭代 6 轮
+python generate_CoT_adaptive.py --t_low 0.2 --n_low 5 --t_high 1.0 --n_per_iter 3 --max_iters 6
+
+# 调整 logprob 阈值（越接近 0 越严格，越负越宽松）
+python generate_CoT_adaptive.py --logprob_threshold -1.5
+```
+
+### 命令行参数
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--dataset` | `both` | 选择数据集：`gsm8k`、`math` 或 `both` |
+| `--max_samples` | `None`（全部） | 每个数据集最多处理 N 条 |
+| `--max_tokens` | `2048` | 生成最大 token 数 |
+| `--model` | `deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B` | Teacher model |
+| `--t_low` | `0.3` | Round 1 低温采样温度 |
+| `--t_high` | `0.9` | Round 2+ 迭代式高温采样温度 |
+| `--n_low` | `3` | Round 1 每个 problem 的采样次数 |
+| `--n_per_iter` | `2` | Round 2+ 每轮迭代每个 problem 追加的采样次数 |
+| `--max_iters` | `4` | Round 2+ 最大迭代轮数 |
+| `--logprob_threshold` | `-1.8` | 平均 logprob 阈值（越大越严格，如 `-1.0`；越小越宽松，如 `-3.0`） |
+| `--gpu_memory_utilization` | `0.90` | KV cache 显存占用比例 |
+
+### 输出格式
+
+每行一条 JSON，代表一个候选答案。与 `generate_CoT_vllm.py` 的基础字段一致，额外附加采样元信息：
+
+```json
+{
+  "problem": "Janet's ducks lay 16 eggs per day...",
+  "answer": "**Solution:** ... \\boxed{72}",
+  "temperature": 0.3,
+  "round": 1,
+  "sample_idx": 0
+}
+```
+
+### 输出文件
+
+| 文件 | 内容 |
+|------|------|
+| `data/gsm8k_train_cot_adaptive.jsonl` | GSM8K 自适应采样结果（含所有 round 的全部候选） |
+| `data/math_train_cot_adaptive.jsonl` | MATH 自适应采样结果（含所有 round 的全部候选） |
+
+### 与原有流程的关系
+
+```
+generate_CoT_adaptive.py          → 自适应采样，输出多候选答案
+    ↓
+deduplicate_by_similarity.py      → embedding 去重，剔除高度相似的冗余答案
+    ↓
+filter.py                         → boxed 提取 + 答案比对，输出正确样本用于 SFT
+```
+
+### 相关文件
+
+```
+basic/
+├── data/
+│   ├── gsm8k_train_cot_adaptive.jsonl     # 输出：GSM8K 自适应采样结果
+│   └── math_train_cot_adaptive.jsonl      # 输出：MATH 自适应采样结果
+├── generate_CoT_adaptive.py                # 自适应采样脚本
+└── README.md
+```
+
+---
+
 ## 第三步：答案过滤（已完成）
 
 过滤阶段分为：**Boxed 提取**、**答案清洗**、**不合格答案分离**、**答案比对**和**原因分析**，均已实现。
