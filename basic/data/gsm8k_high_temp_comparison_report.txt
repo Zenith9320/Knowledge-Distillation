@@ -1,0 +1,12 @@
+GSM8K Final Answer Comparison Report
+================================
+
+Total samples:               7473
+  - Empty final_answer:      105   (1.4%)
+  - Non-numeric final_answer:29    (0.4%)
+  - Valid numeric:           7339   (98.2%)
+    - Correct:               6236   (83.4%)
+    - Incorrect:             1103    (14.8%)
+
+Accuracy (correct / total):          83.45%
+Accuracy (correct / valid numeric):  84.97%
