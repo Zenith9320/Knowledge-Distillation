@@ -66,8 +66,6 @@ def main():
         data2 = [json.loads(line) for line in f]
     log.info("Loaded %d records from %s (%.1fs)", len(data2), args.file2, time.perf_counter() - t0)
 
-    assert len(data1) == len(data2), f"File lengths differ: {len(data1)} vs {len(data2)}"
-
     answers1 = [d["answer"] for d in data1]
     answers2 = [d["answer"] for d in data2]
 
@@ -117,8 +115,10 @@ def main():
     results = []
     sims = np.empty(len(data1), dtype=np.float32)
 
+    n_pair = min(len(data1), len(data2))
+
     t0 = time.perf_counter()
-    for i in range(len(data1)):
+    for i in range(n_pair):
         sim = float(np.dot(emb1[i], emb2[i]))
         sims[i] = sim
         results.append(data1[i])
@@ -128,6 +128,23 @@ def main():
             kept += 1
         else:
             discarded += 1
+
+    # Append remaining records from the longer file
+    tail_label = ""
+    if len(data1) > n_pair:
+        tail = data1[n_pair:]
+        tail_label = "file1"
+    elif len(data2) > n_pair:
+        tail = data2[n_pair:]
+        tail_label = "file2"
+    else:
+        tail = []
+
+    if tail:
+        results.extend(tail)
+        kept += len(tail)
+        log.info("Appended %d remaining records from %s", len(tail), tail_label)
+
     log.info("Similarity computed in %.1fs", time.perf_counter() - t0)
 
     # Print similarity distribution
