@@ -11,8 +11,9 @@
 | 0 — 数据集准备 | 从 GSM8K 和 MATH 原始数据中提取问题与答案，转为统一 JSONL 格式 | ✅ 已完成 |
 | 1 — Teacher 生成 CoT | 用 teacher model 对训练集逐题生成带 CoT 的解答 | ✅ 已完成 |
 | 2 — 答案过滤 | 从 CoT 中提取最终答案，比对 ground-truth，筛除答错的样本 | ✅ 已完成 |
-| 3 — Student Fine-tune | 用过滤后的正确 CoT 数据 SFT 小模型 | 待实现 |
-| 4 — 测试评估 | 在测试集上评估 student model 准确率 | 待实现 |
+| 3 — 数据集合并 | 将 GSM8K 和 MATH 正确样本合并打乱，形成统一的 SFT 训练集 | ✅ 已完成 |
+| 4 — Student Fine-tune | 用合并后的 CoT 数据 SFT 小模型 | 待实现 |
+| 5 — 测试评估 | 在测试集上评估 student model 准确率 | 待实现 |
 
 ---
 
@@ -788,10 +789,50 @@ basic/
 
 ---
 
+## 第四步：数据集合并（已完成）
+
+将 GSM8K 和 MATH 两个数据集过滤后的正确样本合并为一个统一的训练集，打乱顺序后供 student model SFT 使用。两个数据集的字段不完全相同（MATH 比 GSM8K 多了 `type` 和 `level` 字段），合并时各自保留原有字段，缺失字段自然不存在。
+
+### 使用方法
+
+```bash
+python merge_datasets.py data/gsm8k_train_cot_correct.jsonl \
+                          data/math_train_cot_correct.jsonl \
+                          -o data/train_cot_correct_merged.jsonl
+```
+
+### 命令行参数
+
+| 参数 | 说明 |
+|------|------|
+| `files` | 一个或多个输入 JSONL 文件 |
+| `-o` / `--output` | 输出文件路径 |
+| `-s` / `--seed` | 随机种子（默认 `42`），用于可复现的 shuffle |
+
+### 输出文件
+
+| 文件 | GSM8K | MATH | 合计 |
+|------|-------|------|------|
+| `data/train_cot_correct_merged.jsonl` | 6,298 | 5,341 | 11,639 |
+
+### 相关文件
+
+```
+basic/
+├── data/
+│   ├── gsm8k_train_cot_correct.jsonl        # 输入：GSM8K 正确样本
+│   ├── math_train_cot_correct.jsonl         # 输入：MATH 正确样本
+│   └── train_cot_correct_merged.jsonl       # 输出：合并打乱后的训练集
+├── merge_datasets.py                         # 合并脚本
+└── README.md
+```
+
+---
+
 ## 后续工作
 
 | 阶段 | 说明 |
 |------|------|
-| Student Fine-tune | 用 `data/gsm8k_train_cot_correct.jsonl`（6,298 条）和 `data/math_train_cot_correct.jsonl`（5,341 条）正确 CoT 数据对较小的 student model 进行监督微调（SFT） |
+| Student Fine-tune | 用 `data/train_cot_correct_merged.jsonl`（11,639 条）对较小的 student model 进行监督微调（SFT） |
 | 测试评估 | 在 `data/gsm8k_test.jsonl` 和 `data/math_test.jsonl` 上评估微调后的 student model 准确率，并与 teacher / 未微调 baseline 对比 |
 | 准确率提升 | 探索改进 teacher model 生成质量（更好的 prompt、更大的模型、增加生成长度），以降低 MATH 30.1% 的空答案率和提升整体正确率 |
