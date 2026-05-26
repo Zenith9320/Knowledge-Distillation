@@ -25,6 +25,10 @@ import json
 import os
 from typing import Any
 
+# Fall back to PyTorch native sampler when CUDA toolkit (nvcc) is unavailable
+# (e.g. WSL2 without full CUDA install).  Must be set before vLLM import.
+os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
+
 from vllm import LLM, SamplingParams
 
 MODEL_NAME = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
@@ -110,6 +114,7 @@ def load_model(model_name: str, gpu_memory_utilization: float = 0.90):
         trust_remote_code=True,
         gpu_memory_utilization=gpu_memory_utilization,
         enforce_eager=True,
+        max_model_len=4096,
     )
     print("Model loaded.")
     return llm
