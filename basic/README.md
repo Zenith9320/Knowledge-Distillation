@@ -9,8 +9,8 @@
 | 阶段 | 说明 | 状态 |
 |------|------|------|
 | 0 — 数据集准备 | 从 GSM8K 和 MATH 原始数据中提取问题与答案，转为统一 JSONL 格式 | ✅ 已完成 |
-| 1 — Teacher 生成 CoT | 用 teacher model 对训练集逐题生成带 CoT 的解答 | ✅ 已完成 |
-| 2 — 答案过滤 | 从 CoT 中提取最终答案，比对 ground-truth，筛除答错的样本 | ✅ 已完成 |
+| 1 — Teacher 生成 CoT | 用 teacher model 对训练集逐题生成带 CoT 的解答（vLLM 批量 / 自适应采样两种方式） | ✅ 已完成 |
+| 2 — 答案过滤 | 从 CoT 中提取最终答案，比对 ground-truth，筛除答错的样本（标准 / 自适应两种方式） | ✅ 已完成 |
 | 3 — 数据集合并 | 将 GSM8K 和 MATH 正确样本合并打乱，形成统一的 SFT 训练集 | ✅ 已完成 |
 | 4 — Student Fine-tune | 用合并后的 CoT 数据 SFT 小模型（Qwen2.5-0.5B / TinyLlama） | 脚本就绪，待执行 |
 | 5 — 测试评估 | 在测试集上评估 student model 准确率 | 待实现 |
@@ -87,109 +87,19 @@ basic/
 
 ---
 
-## 第二步：Teacher 生成 CoT（已完成）
+## 第二步：Teacher 生成 CoT
 
-采用**单步生成**策略，用 teacher model（DeepSeek-R1-Distill-Qwen-1.5B）对训练集中每个 problem 生成完整的 CoT 解答。
+Teacher model 使用 **DeepSeek-R1-Distill-Qwen-1.5B**。生成时通过 `clean_deepseek_tags()` 去除 `<think>...</think>` 标签及其之前的模型内部思考部分，仅保留实际的 CoT 解答。
 
-### 生成流程
+共提供 **两种生成方式**：vLLM 批量生成（推荐，10-20x 吞吐提升）和自适应采样生成（按需多采样，提升覆盖率）。
 
-| 步骤 | 说明 |
-|------|------|
-| 生成 | 将 problem 原文发给模型，模型续写推理过程和答案 |
-| 清洗 | 去除 `<think>...</think>` 标签及其之前的内容（模型内部思考），仅保留实际的 CoT 解答部分 |
+> **注意**：另有一个基于 HuggingFace 原生推理的原始版本 `generate_CoT.py`（逐条生成，~1 sample/s），仅作早期实验参考，不推荐使用。
 
-DeepSeek-R1 系列模型会在输出中生成 `<think>...</think>` 包裹的内部推理过程，这部分内容对下游蒸馏没有帮助。脚本通过 `clean_deepseek_tags()` 定位 `</think>` 标记，截取其后的实际 CoT 解答内容。
+### 2.1 vLLM 批量生成
 
-最终输出格式为 `{"problem": ..., "answer": ...}` 的 JSONL。
+vLLM 版本通过 PagedAttention 和 continuous batching 替代逐条 inference，提供 10-20x 吞吐提升，适合全量数据集批量生成。
 
-### 使用方法
-
-```bash
-# 完整运行（两个数据集全部样本）
-python generate_CoT.py
-
-# 仅测试 GSM8K，限制 10 条
-python generate_CoT.py --dataset gsm8k --max_samples 10
-
-# 仅处理 MATH，限制 50 条，调整生成长度
-python generate_CoT.py --dataset math --max_samples 50 --max_new_tokens 4096
-
-# 使用其他 teacher model
-python generate_CoT.py --model deepseek-ai/DeepSeek-R1-Distill-Qwen-7B
-```
-
-### 命令行参数
-
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `--dataset` | `both` | 选择数据集：`gsm8k`、`math` 或 `both` |
-| `--max_samples` | `None`（全部） | 每个数据集最多处理 N 条，用于快速测试 |
-| `--max_new_tokens` | `2048` | 生成最大 token 数 |
-| `--model` | `deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B` | Teacher model 名称或路径 |
-
-### 生成的输出文件
-
-| 文件 | 字段 |
-|------|------|
-| `data/gsm8k_train_cot.jsonl` | `problem`, `answer` |
-| `data/math_train_cot.jsonl` | `problem`, `answer`, `type`, `level` |
-
-### 实现思路
-
-#### Teacher Model
-
-采用 DeepSeek-R1-Distill-Qwen-1.5B 作为 teacher model，这是一个基于 Qwen-1.5B 的推理蒸馏模型，原生支持 Chain-of-Thought 思考过程，模型规模适中（1.5B 参数），适合在单卡 GPU 甚至 CPU 环境下运行推理。默认使用 `device_map="auto"`，优先使用 GPU（CUDA），不可用时回退到 CPU。
-
-#### Prompt 设计
-
-Prompt 直接使用 problem 原文，通过 `tokenizer.apply_chat_template` 包装为 DeepSeek-R1 所需的 chat 格式（单条 user message）。
-
-#### 输出清洗
-
-DeepSeek-R1 模型的原始输出包含 `<think>...</think>` 标签包裹的内部推理过程。`clean_deepseek_tags()` 函数定位 `</think>` 标记并截取其后的实际 CoT 解答内容，丢弃模型内部思考部分。
-
-#### 生成参数
-
-- `temperature=0.6`：适度的随机性，鼓励模型展开多角度推理。
-- `top_p=0.95`：nucleus sampling 截断低概率 token。
-- `max_new_tokens=2048`：数学推理通常足够；MATH 难题可能需要 4096。
-
-### 相关文件
-
-```
-basic/
-├── data/
-│   ├── gsm8k_train.jsonl          # GSM8K 训练集（输入）
-│   ├── gsm8k_test.jsonl           # GSM8K 测试集
-│   ├── math_train.jsonl           # MATH 训练集（输入）
-│   ├── math_test.jsonl            # MATH 测试集
-│   ├── gsm8k_train_cot.jsonl      # GSM8K CoT 生成结果（输出）
-│   └── math_train_cot.jsonl       # MATH CoT 生成结果（输出）
-├── load_grade_school_math_dataset.py   # GSM8K 数据预处理脚本
-├── load_MATH_dataset.py                # MATH 数据预处理脚本
-├── generate_CoT.py                     # Teacher CoT 生成脚本
-└── README.md                           # 本文件
-```
-
-### 输出格式
-
-每行一条 JSON：
-
-```json
-// GSM8K
-{"problem": "Janet's ducks lay 16 eggs per day...", "answer": "Let's think step by step..."}
-
-// MATH（额外包含 type 和 level）
-{"problem": "How many positive integers...", "answer": "Let's think step by step...", "type": "Algebra", "level": "Level 3"}
-```
-
----
-
-## 第二步（vLLM 加速版）
-
-vLLM 版本提供 10-20x 吞吐提升，通过 PagedAttention 和 continuous batching 替代逐条 inference。适合全量数据集跑批量生成。
-
-### 优势
+#### 优势
 
 | 特性 | 原始 HF 版本 | vLLM 版本 |
 |------|-------------|-----------|
@@ -198,7 +108,7 @@ vLLM 版本提供 10-20x 吞吐提升，通过 PagedAttention 和 continuous bat
 | 吞吐 | ~1 sample/s | ~10-20 samples/s |
 | 代码复杂度 | 简单，易调试 | 同样简单，调用高层 API |
 
-### 安装依赖
+#### 安装依赖
 
 ```bash
 pip install vllm
@@ -206,7 +116,7 @@ pip install vllm
 
 > **注意**：vLLM 需要 CUDA 环境。如果安装遇到问题，参考 [官方文档](https://docs.vllm.ai/en/latest/getting_started/installation.html)。
 
-### 使用方法
+#### 使用方法
 
 ```bash
 # 完整运行（两个数据集全部样本）
@@ -225,7 +135,7 @@ python generate_CoT_vllm.py --dataset math --max_tokens 4096 --gpu_memory_utiliz
 python generate_CoT_vllm.py --model deepseek-ai/DeepSeek-R1-Distill-Qwen-7B --gpu_memory_utilization 0.85
 ```
 
-### 命令行参数
+#### 命令行参数
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
@@ -234,18 +144,37 @@ python generate_CoT_vllm.py --model deepseek-ai/DeepSeek-R1-Distill-Qwen-7B --gp
 | `--max_tokens` | `2048` | 生成最大 token 数 |
 | `--batch_size` | `32` | 每批处理样本数，GPU 显存充足时可调大 |
 | `--model` | `deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B` | Teacher model |
+| `--temperature` | `0.6` | 采样温度 |
 | `--gpu_memory_utilization` | `0.90` | KV cache 显存占用比例，OOM 时降低 |
 
-### 输出
-
-输出格式和文件路径与原始版本完全一致，可直接替换使用：
+#### 输出
 
 | 文件 | 字段 |
 |------|------|
 | `data/gsm8k_train_cot.jsonl` | `problem`, `answer` |
 | `data/math_train_cot.jsonl` | `problem`, `answer`, `type`, `level` |
 
-### 相关文件
+#### 实现思路
+
+##### Teacher Model
+
+采用 DeepSeek-R1-Distill-Qwen-1.5B 作为 teacher model，这是一个基于 Qwen-1.5B 的推理蒸馏模型，原生支持 Chain-of-Thought 思考过程，模型规模适中（1.5B 参数），适合在单卡 GPU 甚至 CPU 环境下运行推理。
+
+##### Prompt 设计
+
+使用 chat template 包装为 system + user 格式。System prompt 要求模型逐步推理并将最终答案放入 `\boxed{}`。
+
+##### 输出清洗
+
+DeepSeek-R1 模型的原始输出包含 `<think>...</think>` 标签包裹的内部推理过程。`clean_deepseek_tags()` 函数定位 `</think>` 标记并截取其后的实际 CoT 解答内容。
+
+##### 生成参数
+
+- `temperature=0.6`：适度的随机性，鼓励模型展开多角度推理。
+- `top_p=0.95`：nucleus sampling 截断低概率 token。
+- `max_new_tokens=2048`：数学推理通常足够；MATH 难题可能需要 4096。
+
+#### 相关文件
 
 ```
 basic/
@@ -254,18 +183,141 @@ basic/
 │   ├── math_train.jsonl               # MATH 训练集（输入）
 │   ├── gsm8k_train_cot.jsonl          # GSM8K CoT 生成结果（输出）
 │   └── math_train_cot.jsonl           # MATH CoT 生成结果（输出）
-├── generate_CoT.py                    # 原始 HF 版本（逐条推理）
-├── generate_CoT_vllm.py               # vLLM 加速版本（批量推理）
+├── generate_CoT.py                    # 原始 HF 版本（逐条推理，参考用）
+├── generate_CoT_vllm.py               # vLLM 加速版本（推荐）
 └── README.md
 ```
 
 ---
 
-## 第二步补充：多温度答案去重
+### 2.2 自适应采样生成
+
+> **注意**：GSM8K 全量已完成，MATH 尚未执行。
+
+同一 problem 并非都需要同样的采样策略——简单题低温一次即可得出正确答案，难题才需要高温多采样来探索不同的推理路径。自适应采样的目标是根据模型的生成过程自身体现的"确定程度"，按需分配采样算力。
+
+#### 实现思路
+
+| 阶段 | 说明 |
+|------|------|
+| Round 1 | 全部 problem，低温（`T=0.3`）使用 `n_low=3` 生成 3 个候选答案 |
+| 置信度评估 | 纯 logprob 驱动——计算每条生成序列的 per-token 平均 log 概率，若任意一条的均值 ≥ 阈值则高置信度 |
+| Round 2+ | 迭代式：仅低置信度 problem，高温（`T=0.9`）每轮追加 `n_per_iter=2` 次采样，采样后重新评估，达标即退出，最多 `max_iters=4` 轮 |
+| 输出合并 | 所有候选答案写入同一 JSONL，带 `temperature`、`round`、`sample_idx` 标签 |
+
+**置信度模型 — 为什么用 logprob 而不是自洽性投票**：
+
+1. **零额外开销**：vLLM 的 `SamplingParams(logprobs=1)` 在生成每个 token 的同时顺带返回其 log 概率，不增加任何计算量。
+2. **与下游解耦**：`\boxed{}` 提取和答案比对是过滤阶段的职责，自适应采样不应越俎代庖。logprob 纯粹衡量"模型对自己输出文本的确定程度"，与答案正确性无关。
+3. **更直接的信号**：低平均 logprob 意味着模型在生成时就在多个 token 选项之间摇摆，这正是"不确定性"的直接度量，比事后比对答案更早感知。
+
+**迭代式 Round 2 的优势**：每个低置信度 problem 单独追踪置信度变化，一旦某轮追加采样后达到阈值就停止，避免对已经找到高置信度推理路径的 problem 继续浪费采样。例如 300 个低置信度 problem 可能第 1 轮就有 200 个达标，仅剩 100 个继续下一轮。
+
+#### 使用方法
+
+```bash
+# 默认参数运行
+python generate_CoT_adaptive.py
+
+# 仅测试 GSM8K，限制 20 条
+python generate_CoT_adaptive.py --dataset gsm8k --max_samples 20
+
+# 自定义迭代策略：低温保守、高温激进、最多迭代 6 轮
+python generate_CoT_adaptive.py --t_low 0.2 --n_low 5 --t_high 1.0 --n_per_iter 3 --max_iters 6
+
+# 调整 logprob 阈值（越接近 0 越严格，越负越宽松）
+python generate_CoT_adaptive.py --logprob_threshold -1.5
+```
+
+#### 运行结果（GSM8K 全量）
+
+```bash
+python generate_CoT_adaptive.py --dataset gsm8k --gpu_memory_utilization 0.75
+```
+
+耗时约 1 小时 35 分钟（WSL2，8 GiB VRAM，vLLM 批量推理）。
+
+| 统计项 | 数值 |
+|--------|------|
+| 总 problem 数 | 7,473 |
+| Round 1 高置信度 | 7,473 / 7,473（100%） |
+| 触发 Round 2 迭代 | 0 |
+| 总生成答案数 | 22,419（7,473 × 3） |
+| 输出文件 | `data/gsm8k_train_cot_adaptive.jsonl` |
+
+全部 7,473 题在 Round 1（`T=0.3`, `n_low=3`）即达到 logprob 阈值（`-1.8`），无需进入高温迭代轮次。这说明在默认阈值下，低温采样已为全部 GSM8K 题目产生高置信度的推理路径。Round 2 机制更多是为 MATH 等更难的数据集预留——MATH 题目难度更高、模型不确定性更大，更可能需要高温迭代采样。
+
+#### 命令行参数
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--dataset` | `both` | 选择数据集：`gsm8k`、`math` 或 `both` |
+| `--max_samples` | `None`（全部） | 每个数据集最多处理 N 条 |
+| `--max_tokens` | `2048` | 生成最大 token 数 |
+| `--model` | `deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B` | Teacher model |
+| `--t_low` | `0.3` | Round 1 低温采样温度 |
+| `--t_high` | `0.9` | Round 2+ 迭代式高温采样温度 |
+| `--n_low` | `3` | Round 1 每个 problem 的采样次数 |
+| `--n_per_iter` | `2` | Round 2+ 每轮迭代每个 problem 追加的采样次数 |
+| `--max_iters` | `4` | Round 2+ 最大迭代轮数 |
+| `--logprob_threshold` | `-1.8` | 平均 logprob 阈值（越大越严格，如 `-1.0`；越小越宽松，如 `-3.0`） |
+| `--gpu_memory_utilization` | `0.90` | KV cache 显存占用比例 |
+
+#### 输出格式
+
+每行一条 JSON，代表一个候选答案。与 `generate_CoT_vllm.py` 的基础字段一致，额外附加采样元信息：
+
+```json
+{
+  "problem": "Janet's ducks lay 16 eggs per day...",
+  "answer": "**Solution:** ... \\boxed{72}",
+  "temperature": 0.3,
+  "round": 1,
+  "sample_idx": 0
+}
+```
+
+#### 输出文件
+
+| 文件 | 内容 |
+|------|------|
+| `data/gsm8k_train_cot_adaptive.jsonl` | GSM8K 自适应采样结果（含所有 round 的全部候选） |
+| `data/math_train_cot_adaptive.jsonl` | MATH 自适应采样结果（含所有 round 的全部候选） |
+
+#### 相关文件
+
+```
+basic/
+├── data/
+│   ├── gsm8k_train_cot_adaptive.jsonl          # 输出：GSM8K 自适应采样结果
+│   └── math_train_cot_adaptive.jsonl           # 输出：MATH 自适应采样结果
+├── generate_CoT_adaptive.py                     # 自适应采样脚本
+└── README.md
+```
+
+
+---
+
+## 第三步：答案过滤
+
+过滤阶段负责从 CoT 中提取 `\boxed{}` 包裹的最终答案，清洗后与 ground-truth 比对。提供 **两种过滤脚本**，分别对应第二步的两种生成方式：
+
+- **`filter.py`** — 用于 vLLM 批量生成的输出（每 problem 一条 CoT）
+- **`filter_adaptive.py`** — 用于自适应采样生成的输出（每 problem 多条 CoT）
+
+两者共用同一套 boxed 提取和答案清洗逻辑，差异在于 ground-truth 匹配方式（逐行 zip vs 按 problem 文本查找）和统计维度（样本级 vs 样本级 + problem 级）。
+
+---
+
+### 3.1 标准过滤（filter.py）
+
+用于 vLLM 批量生成的标准输出（`gsm8k_train_cot.jsonl` / `math_train_cot.jsonl`）。标准流程中，会对同一 problem 分别以低 temperature（T=0.6）和高 temperature（T=0.9）生成两条 CoT，先经过去重再送入 filter.py 进行 boxed 提取和答案比对。
+
+#### 3.1.0 多温度答案去重（deduplicate_by_similarity.py）
 
 针对同一 problem 在不同 temperature（如 `temperature=0.6` 和 `temperature=0.9`）下生成的答案，部分 pair 语义高度相似——高 temperature 并未带来有意义的多样性，反而产生冗余数据。去重阶段通过 embedding + 余弦相似度识别这些近似重复的 pair，相似度过高的只保留其中一条，减少训练集冗余。
 
-### 实现思路
+**实现思路**：
 
 | 步骤 | 说明 |
 |------|------|
@@ -277,7 +329,7 @@ basic/
 
 **为什么用 embedding 而不是 TF-IDF**：TF-IDF 仅做词级匹配，无法识别同义表达（如 "Natalia sold 48 clips" vs "Natalia sold clips to 48 friends"）。Sentence-BERT 的语义 embedding 能捕获 paraphrase，去重判断更准确。
 
-### 使用方法
+**使用方法**：
 
 ```bash
 # 默认阈值 0.92
@@ -297,7 +349,7 @@ python deduplicate_by_similarity.py data/gsm8k_train_cot.jsonl \
                                     --model all-mpnet-base-v2
 ```
 
-### 命令行参数
+**命令行参数**：
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
@@ -308,261 +360,40 @@ python deduplicate_by_similarity.py data/gsm8k_train_cot.jsonl \
 | `--model` | `all-MiniLM-L6-v2` | SentenceTransformer 模型名称 |
 | `--batch-size` | `64` | 编码时的 batch size |
 
-### 输出文件
+**运行结果**：
+
+| 数据集 | 低 T 输入 | 高 T 输入 | 去重后 | 丢弃 | 保留率 |
+|--------|-----------|-----------|--------|------|--------|
+| GSM8K | 7,473 | 7,473 | — | — | — |
+| MATH | 11,248 | 5,087 | 14,700 | 1,635 | 90.0% |
+
+> MATH 高 temperature 生成时仅覆盖了部分 problem（5,087 条），因此两个文件长度不等。`deduplicate_by_similarity.py` 对配对范围外的 file1 剩余记录直接追加到输出。
+
+**输出文件**：
 
 | 文件 | 内容 |
 |------|------|
-| `data/gsm8k_train_cot_dedup.jsonl` | 去重后的合并数据（`problem` + `answer`） |
+| `data/gsm8k_train_cot_dedup.jsonl` | GSM8K 去重后的合并数据（`problem` + `answer`） |
+| `data/math_train_cot_dedup.jsonl` | MATH 去重后的合并数据（`problem` + `answer`） |
 
 输出始终包含 file1 的全部答案，file2 中仅保留与 file1 相似度 ≤ 阈值的答案。
 
-### 相关文件
+**相关文件**：
 
 ```
 basic/
 ├── data/
 │   ├── gsm8k_train_cot.jsonl              # 输入：低 temperature CoT（file1）
 │   ├── gsm8k_train_cot_high_temp.jsonl    # 输入：高 temperature CoT（file2）
-│   └── gsm8k_train_cot_dedup.jsonl        # 输出去重后数据
+│   ├── gsm8k_train_cot_dedup.jsonl        # 输出：GSM8K 去重后数据
+│   ├── math_train_cot.jsonl               # 输入：低 temperature CoT（file1）
+│   ├── math_train_cot_high_temp.jsonl     # 输入：高 temperature CoT（file2）
+│   └── math_train_cot_dedup.jsonl         # 输出：MATH 去重后数据
 ├── deduplicate_by_similarity.py            # 去重脚本
 └── README.md
 ```
 
----
-
-## 第二步补充（改进思路）：自适应采样生成
-
-> **注意**：GSM8K 全量已完成，MATH 尚未执行。
-
-同一 problem 并非都需要同样的采样策略——简单题低温一次即可得出正确答案，难题才需要高温多采样来探索不同的推理路径。自适应采样的目标是根据模型的生成过程自身体现的"确定程度"，按需分配采样算力。
-
-### 实现思路
-
-| 阶段 | 说明 |
-|------|------|
-| Round 1 | 全部 problem，低温（`T=0.3`）使用 `n_low=3` 生成 3 个候选答案 |
-| 置信度评估 | 纯 logprob 驱动——计算每条生成序列的 per-token 平均 log 概率，若任意一条的均值 ≥ 阈值则高置信度 |
-| Round 2+ | 迭代式：仅低置信度 problem，高温（`T=0.9`）每轮追加 `n_per_iter=2` 次采样，采样后重新评估，达标即退出，最多 `max_iters=4` 轮 |
-| 输出合并 | 所有候选答案写入同一 JSONL，带 `temperature`、`round`、`sample_idx` 标签，后续由 filter.py 统一处理 |
-
-**置信度模型 — 为什么用 logprob 而不是自洽性投票**：
-
-1. **零额外开销**：vLLM 的 `SamplingParams(logprobs=1)` 在生成每个 token 的同时顺带返回其 log 概率，不增加任何计算量。
-2. **与下游解耦**：`\boxed{}` 提取和答案比对是 `filter.py` 的职责，自适应采样不应越俎代庖。logprob 纯粹衡量"模型对自己输出文本的确定程度"，与答案正确性无关。
-3. **更直接的信号**：低平均 logprob 意味着模型在生成时就在多个 token 选项之间摇摆，这正是"不确定性"的直接度量，比事后比对答案更早感知。
-
-**迭代式 Round 2 的优势**：每个低置信度 problem 单独追踪置信度变化，一旦某轮追加采样后达到阈值就停止，避免对已经找到高置信度推理路径的 problem 继续浪费采样。例如 300 个低置信度 problem 可能第 1 轮就有 200 个达标，仅剩 100 个继续下一轮。
-
-### 使用方法
-
-```bash
-# 默认参数运行
-python generate_CoT_adaptive.py
-
-# 仅测试 GSM8K，限制 20 条
-python generate_CoT_adaptive.py --dataset gsm8k --max_samples 20
-
-# 自定义迭代策略：低温保守、高温激进、最多迭代 6 轮
-python generate_CoT_adaptive.py --t_low 0.2 --n_low 5 --t_high 1.0 --n_per_iter 3 --max_iters 6
-
-# 调整 logprob 阈值（越接近 0 越严格，越负越宽松）
-python generate_CoT_adaptive.py --logprob_threshold -1.5
-```
-
-### 运行结果（GSM8K 全量）
-
-```bash
-python generate_CoT_adaptive.py --dataset gsm8k --gpu_memory_utilization 0.75
-```
-
-耗时约 1 小时 35 分钟（WSL2，8 GiB VRAM，vLLM 批量推理）。
-
-| 统计项 | 数值 |
-|--------|------|
-| 总 problem 数 | 7,473 |
-| Round 1 高置信度 | 7,473 / 7,473（100%） |
-| 触发 Round 2 迭代 | 0 |
-| 总生成答案数 | 22,419（7,473 × 3） |
-| 输出文件 | `data/gsm8k_train_cot_adaptive.jsonl` |
-
-全部 7,473 题在 Round 1（`T=0.3`, `n_low=3`）即达到 logprob 阈值（`-1.8`），无需进入高温迭代轮次。这说明在默认阈值下，低温采样已为全部 GSM8K 题目产生高置信度的推理路径。Round 2 机制更多是为 MATH 等更难的数据集预留——MATH 题目难度更高、模型不确定性更大，更可能需要高温迭代采样。
-
-### 命令行参数
-
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `--dataset` | `both` | 选择数据集：`gsm8k`、`math` 或 `both` |
-| `--max_samples` | `None`（全部） | 每个数据集最多处理 N 条 |
-| `--max_tokens` | `2048` | 生成最大 token 数 |
-| `--model` | `deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B` | Teacher model |
-| `--t_low` | `0.3` | Round 1 低温采样温度 |
-| `--t_high` | `0.9` | Round 2+ 迭代式高温采样温度 |
-| `--n_low` | `3` | Round 1 每个 problem 的采样次数 |
-| `--n_per_iter` | `2` | Round 2+ 每轮迭代每个 problem 追加的采样次数 |
-| `--max_iters` | `4` | Round 2+ 最大迭代轮数 |
-| `--logprob_threshold` | `-1.8` | 平均 logprob 阈值（越大越严格，如 `-1.0`；越小越宽松，如 `-3.0`） |
-| `--gpu_memory_utilization` | `0.90` | KV cache 显存占用比例 |
-
-### 输出格式
-
-每行一条 JSON，代表一个候选答案。与 `generate_CoT_vllm.py` 的基础字段一致，额外附加采样元信息：
-
-```json
-{
-  "problem": "Janet's ducks lay 16 eggs per day...",
-  "answer": "**Solution:** ... \\boxed{72}",
-  "temperature": 0.3,
-  "round": 1,
-  "sample_idx": 0
-}
-```
-
-### 输出文件
-
-| 文件 | 内容 |
-|------|------|
-| `data/gsm8k_train_cot_adaptive.jsonl` | GSM8K 自适应采样结果（含所有 round 的全部候选） |
-| `data/math_train_cot_adaptive.jsonl` | MATH 自适应采样结果（含所有 round 的全部候选） |
-
-### 与原有流程的关系
-
-```
-generate_CoT_adaptive.py          → 自适应采样，输出多候选答案
-    ↓
-filter_adaptive.py                → 按 problem 匹配 ground-truth，boxed 提取 + 答案比对，输出正确样本
-```
-
-### 相关文件
-
-```
-basic/
-├── data/
-│   ├── gsm8k_train_cot_adaptive.jsonl              # 输出：GSM8K 自适应采样结果
-│   ├── gsm8k_train_cot_adaptive_filtered.jsonl     # 输出：追加 final_answer 字段（全部样本）
-│   ├── gsm8k_train_cot_adaptive_correct.jsonl      # 输出：比对正确的样本
-│   ├── gsm8k_train_cot_adaptive_incorrect.jsonl    # 输出：非空但比对错误的样本
-│   ├── gsm8k_train_cot_adaptive_bad.jsonl          # 输出：final_answer 为空的样本
-│   ├── gsm8k_adaptive_comparison_report.txt        # 输出：答案比对统计报告
-│   └── math_train_cot_adaptive.jsonl               # 输出：MATH 自适应采样结果
-├── generate_CoT_adaptive.py                         # 自适应采样脚本
-├── filter_adaptive.py                               # 自适应采样专用过滤脚本
-└── README.md
-```
-
----
-
-## 第二步补充：自适应采样答案过滤
-
-`filter_adaptive.py` 是 `filter.py` 的变体，专为自适应采样的多候选输出设计。核心区别在于 **按 problem 文本匹配 ground-truth**（而非逐行 zip），因为每个 problem 有多个候选答案。
-
-### 实现思路
-
-| 步骤 | 说明 |
-|------|------|
-| 1. 加载 ground-truth | 将 ground-truth JSONL 构建为 `problem → answer` 字典 |
-| 2. 逐行处理 | 对自适应输出的每一行，按 problem 文本查找对应的 ground-truth |
-| 3. Boxed 提取 | 复用 `filter.py` 的提取 + 清洗逻辑（GSM8K/MATH 两种模式） |
-| 4. 答案比对 | 数值比对（GSM8K）或字符串比对（MATH），判断 `is_correct` |
-| 5. 分类输出 | 正确 / 错误（非空但不匹配）/ 不合格（空答案）分文件输出 |
-| 6. 统计报告 | 样本级 + problem 级统计，含 per-round 分布 |
-
-**Problem 级统计**是自适应过滤独有的价值——同一个 problem 的多个候选答案中，可能部分正确、部分错误。报告会统计：
-- 有多少 problem **全部候选**都正确
-- 有多少 problem **至少有一个**正确候选
-- 有多少 problem **全部候选**都错误
-
-### 使用方法
-
-```bash
-# GSM8K 模式（默认）
-python filter_adaptive.py \
-    -i data/gsm8k_train_cot_adaptive.jsonl \
-    -g data/gsm8k_train.jsonl \
-    -o data/gsm8k_train_cot_adaptive_filtered.jsonl \
-    -c data/gsm8k_train_cot_adaptive_correct.jsonl \
-    -w data/gsm8k_train_cot_adaptive_incorrect.jsonl \
-    -b data/gsm8k_train_cot_adaptive_bad.jsonl \
-    -r data/gsm8k_adaptive_comparison_report.txt
-
-# MATH 模式
-python filter_adaptive.py --math \
-    -i data/math_train_cot_adaptive.jsonl \
-    -g data/math_train.jsonl \
-    -o data/math_train_cot_adaptive_filtered.jsonl \
-    -c data/math_train_cot_adaptive_correct.jsonl \
-    -w data/math_train_cot_adaptive_incorrect.jsonl \
-    -b data/math_train_cot_adaptive_bad.jsonl \
-    -r data/math_adaptive_comparison_report.txt
-```
-
-### 命令行参数
-
-| 参数 | 说明 |
-|------|------|
-| `-i` / `--input` | 自适应采样 CoT JSONL（含 `temperature`、`round`、`sample_idx`） |
-| `-g` / `--ground_truth` | Ground-truth JSONL 文件（按 problem 文本匹配） |
-| `-o` / `--output` | 过滤后的输出（全部样本，追加 `final_answer`、`ground_truth`、`is_correct`） |
-| `-c` / `--correct_output` | 比对正确的样本输出 |
-| `-w` / `--incorrect_output` | 非空但比对错误的样本输出 |
-| `-b` / `--bad_output` | `final_answer` 为空的样本输出 |
-| `-r` / `--report` | 统计报告输出路径 |
-| `--math` | MATH 模式：保留 LaTeX，字符串比对 |
-
-### 输出格式
-
-```json
-{
-  "problem": "Natalia sold clips to 48 of her friends...",
-  "answer": "**Solution:** ... \\boxed{72}",
-  "temperature": 0.3,
-  "round": 1,
-  "sample_idx": 0,
-  "final_answer": "72",
-  "ground_truth": "72",
-  "is_correct": true
-}
-```
-
-### 运行结果（GSM8K 全量）
-
-| 统计项 | 数值 | 对比原始 filter.py（单次 T=0.6） |
-|--------|------|----------------------------------|
-| 总样本数 | 22,419 | 7,473 |
-| `final_answer` 为空 | 433（1.9%） | 163（2.2%） |
-| `final_answer` 非数值 | 55（0.2%） | 16（0.2%） |
-| 合法数值（valid） | 21,931（97.8%） | 7,294（97.6%） |
-| 比对正确 | 18,916（84.4%） | 6,298（84.3%） |
-| **样本级准确率** | **84.37%** | **84.28%** |
-| **合法数值准确率** | **86.25%** | **86.34%** |
-
-样本级准确率与原始单次采样几乎一致，说明低温（T=0.3）的答案质量没有因温度降低而退化。
-
-**Problem 级统计（自适应特有）：**
-
-| 统计项 | 数值 |
-|--------|------|
-| 唯一 problem 数 | 7,473 |
-| **全部 3 个候选均正确** | 5,557（74.4%） |
-| **至少 1 个候选正确** | 6,934（92.8%） |
-| **全部候选均错误** | 539（7.2%） |
-
-92.8% 的问题至少有一个正确答案，相比单次采样的 84.3% 提升了约 8.5 个百分点。这意味着后续通过 majority voting 或 answer selection，有潜力将有效准确率推到接近 93%。
-
-### 输出文件
-
-| 参数 | 输出文件 | 条数 |
-|------|----------|------|
-| `-o` | `gsm8k_train_cot_adaptive_filtered.jsonl` | 22,419 |
-| `-c` | `gsm8k_train_cot_adaptive_correct.jsonl` | 18,916 |
-| `-w` | `gsm8k_train_cot_adaptive_incorrect.jsonl` | 3,070 |
-| `-b` | `gsm8k_train_cot_adaptive_bad.jsonl` | 433 |
-| `-r` | `gsm8k_adaptive_comparison_report.txt` | — |
-
-## 第三步：答案过滤（已完成）
-
-过滤阶段分为：**Boxed 提取**、**答案清洗**、**不合格答案分离**、**答案比对**和**原因分析**，均已实现。
-
-### 3.0 生成数据中存在的问题
+#### 3.1.1 生成数据中存在的问题
 
 在开始过滤之前，首先检查了 teacher model 生成的 CoT 数据质量，发现以下问题：
 
@@ -575,21 +406,21 @@ python filter_adaptive.py --math \
 
 这些问题需要在过滤阶段逐步处理：GSM8K 和 MATH 采用不同的提取和比对策略（通过 `--math` 参数切换）。
 
-### 3.1 Boxed 提取
+#### 3.1.2 Boxed 提取
 
 从 teacher model 生成的 CoT 解答中提取 `\boxed{...}` 包裹的最终答案。
 
 - 采用**括号匹配算法**定位 `\boxed{...}` 边界，正确处理嵌套花括号。
 - 通过 `--math` 参数切换 GSM8K 和 MATH 两种处理模式（见下方）。
 
-#### GSM8K 模式（默认）
+##### GSM8K 模式（默认）
 
 若某条 CoT 中不存在 `\boxed{}`，则依次启用两级回退：
 
 1. **`**Answer:**` 回退提取**（见下方）
 2. **末尾数字回退**（last-resort）：若 `\boxed{}` 和 `**Answer:**` 均未提取到答案，且 CoT 以 `.` 结尾，取全文最后一次出现的数字。
 
-#### MATH 模式（`--math`）
+##### MATH 模式（`--math`）
 
 MATH 数据集的答案形式更多样（代数表达式、LaTeX 分数、日期等），采用更宽松的提取策略：
 
@@ -598,7 +429,7 @@ MATH 数据集的答案形式更多样（代数表达式、LaTeX 分数、日期
 - **分数转换**：`**Answer:**` 后的分数 `4/5` 自动转为 `\frac{4}{5}` 以匹配 ground-truth LaTeX 格式
 - 保留 LaTeX 命令（`\frac`、指数 `^2`、`^3` 等），不强制转为纯数值
 
-#### `**Answer:**` 回退提取（GSM8K 模式）
+##### `**Answer:**` 回退提取（GSM8K 模式）
 
 针对未使用 `\boxed{}` 的样本，从 `**Answer:**`（或 `**Answer**:`）标记处提取最终答案：
 
@@ -619,7 +450,7 @@ MATH 数据集的答案形式更多样（代数表达式、LaTeX 分数、日期
 - 回退提取的数字同样经过 `clean_final_answer()` 清洗（去逗号、LaTeX 符号等），与 `\boxed{}` 路径一致。
 - 若 `**Answer:**` 中仅含英文数字（如 "Five"），则无法提取，`final_answer` 留空。
 
-#### 末尾数字回退（last-resort，仅 GSM8K 模式）
+##### 末尾数字回退（last-resort，仅 GSM8K 模式）
 
 若 `\boxed{}` 和 `**Answer:**` 均未提取到答案，且 CoT 文本以 `.` 结尾（说明推理未在中途截断），则取全文最后一次出现的数字作为 `final_answer`。
 
@@ -628,11 +459,11 @@ MATH 数据集的答案形式更多样（代数表达式、LaTeX 分数、日期
 - 若文本不以 `.` 结尾（截断样本），则不触发此回退，避免取到中间计算结果。
 - **MATH 模式不启用此回退**，因为 MATH 的答案不一定是数字，取末尾数字易误提取中间结果。
 
-### 3.2 答案清洗
+#### 3.1.3 答案清洗
 
 对提取出的 `final_answer` 进行清洗，去除单位和 LaTeX 格式。GSM8K 和 MATH 模式采用不同的清洗策略。
 
-#### GSM8K 模式清洗
+##### GSM8K 模式清洗
 
 目标是使答案尽可能为纯数值，便于后续与 ground-truth 数值比对。
 
@@ -649,7 +480,7 @@ MATH 数据集的答案形式更多样（代数表达式、LaTeX 分数、日期
 
 实现通过 `clean_final_answer()` 函数，按顺序处理：`\text{...}` 块移除 → `\overline{...}` 提取内层 → `\dfrac` / `\frac` 转换 → 格式化符号移除 → 数字逗号移除 → 残余清理。
 
-#### MATH 模式清洗
+##### MATH 模式清洗
 
 保留有意义的 LaTeX 结构和代数符号，仅移除无关格式化标记：
 
@@ -663,7 +494,7 @@ MATH 数据集的答案形式更多样（代数表达式、LaTeX 分数、日期
 | 时间格式标准化 | 是 | 跳过 |
 | 反斜杠残余清理 | 全部移除 | 仅移除格式化命令，保留 LaTeX 命令 |
 
-#### 使用方法
+##### 使用方法
 
 ```bash
 # GSM8K 模式（默认）
@@ -673,7 +504,7 @@ python filter.py -i data/gsm8k_train_cot.jsonl -o data/gsm8k_train_cot_filtered.
 python filter.py --math -i data/math_train_cot.jsonl -o data/math_train_cot_filtered.jsonl
 ```
 
-#### GSM8K 处理结果
+##### GSM8K 处理结果
 
 | 统计项 | 数量 |
 |--------|------|
@@ -688,7 +519,7 @@ python filter.py --math -i data/math_train_cot.jsonl -o data/math_train_cot_filt
 
 剩余 163 条空值主要为 CoT 截断（未以 `.` 结尾）或无任何数值的样本，以及 16 条非数值表达式。
 
-#### MATH 处理结果
+##### MATH 处理结果
 
 | 统计项 | 数量 |
 |--------|------|
@@ -702,7 +533,7 @@ python filter.py --math -i data/math_train_cot.jsonl -o data/math_train_cot_filt
 
 MATH 空值比例（30.1%）远高于 GSM8K（2.2%），主要因为 teacher model 在 MATH 题目中更倾向于不使用 `\boxed{}` 标记答案。
 
-#### 不合格答案自动分离
+##### 不合格答案自动分离
 
 `--bad_output` / `-b` 参数可在过滤同时将 `final_answer` 为空的条目输出到独立文件：
 
@@ -711,7 +542,7 @@ python filter.py --math -i data/math_train_cot.jsonl -o data/math_train_cot_filt
   -b data/math_train_cot_bad.jsonl
 ```
 
-#### 输出格式
+##### 输出格式
 
 ```json
 // GSM8K
@@ -721,7 +552,7 @@ python filter.py --math -i data/math_train_cot.jsonl -o data/math_train_cot_filt
 {"problem": "Expand the product...", "answer": "To expand the product...", "final_answer": "x^3 + 2x^2 + x", "type": "Algebra", "level": "Level 3"}
 ```
 
-### 3.3 不合格答案分离
+#### 3.1.4 不合格答案分离
 
 将 Boxed 提取和清洗后 `final_answer` 为空的样本自动分离到独立文件，方便人工检查或后续处理。
 
@@ -731,39 +562,23 @@ python filter.py --math -i data/math_train_cot.jsonl -o data/math_train_cot_filt
 |------|------|-------|------|
 | 空值 | `final_answer == ""` | 163 | 3,381 |
 
-#### 使用方法
-
-```bash
-# GSM8K
-python filter.py -i data/gsm8k_train_cot.jsonl -o data/gsm8k_train_cot_filtered.jsonl \
-  -b data/gsm8k_train_cot_bad.jsonl
-
-# MATH
-python filter.py --math -i data/math_train_cot.jsonl -o data/math_train_cot_filtered.jsonl \
-  -b data/math_train_cot_bad.jsonl
-```
-
-#### 输出
-
-输出文件保留原始全部字段（`problem`、`answer`、`final_answer`、`type`、`level`），便于逐条审查不合格原因。
-
-### 3.4 答案比对
+#### 3.1.5 答案比对
 
 将 `final_answer` 与 ground-truth 答案进行比对，统计最终正确率。GSM8K 和 MATH 采用不同的比对策略。
 
-#### GSM8K 比对逻辑
+##### GSM8K 比对逻辑
 
 1. 判断 `final_answer` 类别：空值 / 非数值 / 合法数值（整数、小数或分数如 `35/6`）
 2. 对合法数值，去除千分位逗号后转为浮点数与 ground-truth 比对（容差 `1e-9`）
 3. 空值和非数值直接计为错误
 
-#### MATH 比对逻辑
+##### MATH 比对逻辑
 
 1. 判断 `final_answer` 类别：空值 / 非空
 2. 对非空答案，使用**字符串比对**（空白符归一化后），因为 MATH 答案包含 LaTeX 表达式、分数、日期等非纯数值形式
 3. 空值计为错误
 
-#### 使用方法
+##### 使用方法
 
 ```bash
 # gsm8k数据集
@@ -777,7 +592,7 @@ python filter.py --math -i data/math_train_cot.jsonl -o data/math_train_cot_filt
   -c data/math_train_cot_correct.jsonl -w data/math_train_cot_incorrect.jsonl
 ```
 
-#### GSM8K 比对结果
+##### GSM8K 比对结果
 
 | 统计项 | 数量 | 占比 |
 |--------|------|------|
@@ -792,7 +607,7 @@ python filter.py --math -i data/math_train_cot.jsonl -o data/math_train_cot_filt
 | 总准确率（correct / total） | 84.28% |
 | 合法数值准确率（correct / valid） | 86.34% |
 
-#### MATH 比对结果
+##### MATH 比对结果
 
 | 统计项 | 数量 | 占比 |
 |--------|------|------|
@@ -808,7 +623,7 @@ python filter.py --math -i data/math_train_cot.jsonl -o data/math_train_cot_filt
 
 MATH 总准确率显著低于 GSM8K，主要由两方面因素叠加：30.1% 的空答案率 + 非空答案中仍有 32.1% 比对错误。
 
-#### 按题目类型与难度分类统计（MATH）
+##### 按题目类型与难度分类统计（MATH）
 
 | 类型 | 总数 | 空 | 有效 | 正确 | 准确率 | 有效准确率 |
 |------|------|-----|------|------|--------|------------|
@@ -830,7 +645,7 @@ MATH 总准确率显著低于 GSM8K，主要由两方面因素叠加：30.1% 的
 
 准确率随难度递增递减，Level 5 空答案率高达 54.8%，说明难题上 teacher model 更倾向于不输出 `\boxed{}`。
 
-#### 输出文件
+##### 输出文件
 
 | 参数 | 输出文件 | 内容 | GSM8K | MATH |
 |------|----------|------|-------|------|
@@ -840,9 +655,9 @@ MATH 总准确率显著低于 GSM8K，主要由两方面因素叠加：30.1% 的
 | `-b` | `*_bad.jsonl` | `final_answer` 为空的样本 | 163 | 3,381 |
 | `-r` | `*_report.txt` | 比对统计报告 | — | — |
 
-### 3.5 原因分析
+#### 3.1.6 原因分析
 
-#### GSM8K 错误分布
+##### GSM8K 错误分布
 
 | 错误类别 | 数量 | 占比 | 说明 |
 |----------|------|------|------|
@@ -850,7 +665,7 @@ MATH 总准确率显著低于 GSM8K，主要由两方面因素叠加：30.1% 的
 | `final_answer` 为空 | 163 | 2.2% | 无法从 CoT 中提取到任何数值答案 |
 | `final_answer` 非数值 | 16 | 0.2% | 提取到了内容但含字母/符号，非合法数值 |
 
-#### MATH 错误分布
+##### MATH 错误分布
 
 | 错误类别 | 数量 | 占比 | 说明 |
 |----------|------|------|------|
@@ -858,7 +673,7 @@ MATH 总准确率显著低于 GSM8K，主要由两方面因素叠加：30.1% 的
 | `final_answer` 为空 | 3,381 | 30.1% | 无 `\boxed{}` 且 `**Answer:**` 回退失败 |
 | 非空但比对正确 | 5,341 | 47.5% | 正确提取 |
 
-#### 主要错误原因
+##### 主要错误原因
 
 **1. 题意理解偏差**
 
@@ -893,7 +708,7 @@ python check_token_limit.py --input data/math_train_cot.jsonl --max_tokens 4096
 - **答案形式多样**：代数表达式、LaTeX 分数、坐标、日期等非纯数值形式，字符串比对要求精确匹配，细微格式差异即判错
 - **推理能力不足**：Level 5 难题有效准确率仅 63.0%，模型在高级代数、微积分等领域的推理质量有限
 
-### 相关文件
+#### 相关文件
 
 ```
 basic/
@@ -913,6 +728,130 @@ basic/
 │   └── math_empty_answer_problems.txt     # 输出：MATH 空答案题目详情
 ├── filter.py                               # Boxed 提取 + 答案清洗 + 比对 + 训练集输出脚本
 ├── check_token_limit.py                    # Token 截断分析：统计 answer token 数，定位超限样本
+└── README.md
+```
+
+---
+
+### 3.2 自适应采样过滤（filter_adaptive.py）
+
+`filter_adaptive.py` 是 `filter.py` 的变体，专为自适应采样的多候选输出设计。核心区别在于 **按 problem 文本匹配 ground-truth**（而非逐行 zip），因为每个 problem 有多个候选答案。
+
+#### 实现思路
+
+| 步骤 | 说明 |
+|------|------|
+| 1. 加载 ground-truth | 将 ground-truth JSONL 构建为 `problem → answer` 字典 |
+| 2. 逐行处理 | 对自适应输出的每一行，按 problem 文本查找对应的 ground-truth |
+| 3. Boxed 提取 | 复用 `filter.py` 的提取 + 清洗逻辑（GSM8K/MATH 两种模式） |
+| 4. 答案比对 | 数值比对（GSM8K）或字符串比对（MATH），判断 `is_correct` |
+| 5. 分类输出 | 正确 / 错误（非空但不匹配）/ 不合格（空答案）分文件输出 |
+| 6. 统计报告 | 样本级 + problem 级统计，含 per-round 分布 |
+
+**Problem 级统计**是自适应过滤独有的价值——同一个 problem 的多个候选答案中，可能部分正确、部分错误。报告会统计：
+- 有多少 problem **全部候选**都正确
+- 有多少 problem **至少有一个**正确候选
+- 有多少 problem **全部候选**都错误
+
+#### 使用方法
+
+```bash
+# GSM8K 模式（默认）
+python filter_adaptive.py \
+    -i data/gsm8k_train_cot_adaptive.jsonl \
+    -g data/gsm8k_train.jsonl \
+    -o data/gsm8k_train_cot_adaptive_filtered.jsonl \
+    -c data/gsm8k_train_cot_adaptive_correct.jsonl \
+    -w data/gsm8k_train_cot_adaptive_incorrect.jsonl \
+    -b data/gsm8k_train_cot_adaptive_bad.jsonl \
+    -r data/gsm8k_adaptive_comparison_report.txt
+
+# MATH 模式
+python filter_adaptive.py --math \
+    -i data/math_train_cot_adaptive.jsonl \
+    -g data/math_train.jsonl \
+    -o data/math_train_cot_adaptive_filtered.jsonl \
+    -c data/math_train_cot_adaptive_correct.jsonl \
+    -w data/math_train_cot_adaptive_incorrect.jsonl \
+    -b data/math_train_cot_adaptive_bad.jsonl \
+    -r data/math_adaptive_comparison_report.txt
+```
+
+#### 命令行参数
+
+| 参数 | 说明 |
+|------|------|
+| `-i` / `--input` | 自适应采样 CoT JSONL（含 `temperature`、`round`、`sample_idx`） |
+| `-g` / `--ground_truth` | Ground-truth JSONL 文件（按 problem 文本匹配） |
+| `-o` / `--output` | 过滤后的输出（全部样本，追加 `final_answer`、`ground_truth`、`is_correct`） |
+| `-c` / `--correct_output` | 比对正确的样本输出 |
+| `-w` / `--incorrect_output` | 非空但比对错误的样本输出 |
+| `-b` / `--bad_output` | `final_answer` 为空的样本输出 |
+| `-r` / `--report` | 统计报告输出路径 |
+| `--math` | MATH 模式：保留 LaTeX，字符串比对 |
+
+#### 输出格式
+
+```json
+{
+  "problem": "Natalia sold clips to 48 of her friends...",
+  "answer": "**Solution:** ... \\boxed{72}",
+  "temperature": 0.3,
+  "round": 1,
+  "sample_idx": 0,
+  "final_answer": "72",
+  "ground_truth": "72",
+  "is_correct": true
+}
+```
+
+#### 运行结果（GSM8K 全量）
+
+| 统计项 | 数值 | 对比 filter.py（单次 T=0.6） |
+|--------|------|------------------------------|
+| 总样本数 | 22,419 | 7,473 |
+| `final_answer` 为空 | 433（1.9%） | 163（2.2%） |
+| `final_answer` 非数值 | 55（0.2%） | 16（0.2%） |
+| 合法数值（valid） | 21,931（97.8%） | 7,294（97.6%） |
+| 比对正确 | 18,916（84.4%） | 6,298（84.3%） |
+| **样本级准确率** | **84.37%** | **84.28%** |
+| **合法数值准确率** | **86.25%** | **86.34%** |
+
+样本级准确率与原始单次采样几乎一致，说明低温（T=0.3）的答案质量没有因温度降低而退化。
+
+**Problem 级统计（自适应特有）：**
+
+| 统计项 | 数值 |
+|--------|------|
+| 唯一 problem 数 | 7,473 |
+| **全部 3 个候选均正确** | 5,557（74.4%） |
+| **至少 1 个候选正确** | 6,934（92.8%） |
+| **全部候选均错误** | 539（7.2%） |
+
+92.8% 的问题至少有一个正确答案，相比单次采样的 84.3% 提升了约 8.5 个百分点。这意味着后续通过 majority voting 或 answer selection，有潜力将有效准确率推到接近 93%。
+
+#### 输出文件
+
+| 参数 | 输出文件 | 条数 |
+|------|----------|------|
+| `-o` | `gsm8k_train_cot_adaptive_filtered.jsonl` | 22,419 |
+| `-c` | `gsm8k_train_cot_adaptive_correct.jsonl` | 18,916 |
+| `-w` | `gsm8k_train_cot_adaptive_incorrect.jsonl` | 3,070 |
+| `-b` | `gsm8k_train_cot_adaptive_bad.jsonl` | 433 |
+| `-r` | `gsm8k_adaptive_comparison_report.txt` | — |
+
+#### 相关文件
+
+```
+basic/
+├── data/
+│   ├── gsm8k_train_cot_adaptive.jsonl              # 输入：自适应采样结果
+│   ├── gsm8k_train_cot_adaptive_filtered.jsonl     # 输出：追加 final_answer 字段（全部样本）
+│   ├── gsm8k_train_cot_adaptive_correct.jsonl      # 输出：比对正确的样本
+│   ├── gsm8k_train_cot_adaptive_incorrect.jsonl    # 输出：非空但比对错误的样本
+│   ├── gsm8k_train_cot_adaptive_bad.jsonl          # 输出：final_answer 为空的样本
+│   └── gsm8k_adaptive_comparison_report.txt        # 输出：答案比对统计报告
+├── filter_adaptive.py                               # 自适应采样专用过滤脚本
 └── README.md
 ```
 
