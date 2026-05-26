@@ -1,0 +1,20 @@
+GSM8K Final Answer Comparison Report
+====================================
+
+--- Sample-level ---
+Total samples:               11568
+  - Empty final_answer:      258   (2.2%)
+  - Non-numeric final_answer:37    (0.3%)
+  - Valid:                   11273   (97.4%)
+    - Correct:               9508   (82.2%)
+    - Incorrect:             1765    (15.3%)
+
+Accuracy (correct / total):          82.19%
+Accuracy (correct / valid):          84.34%
+
+--- Problem-level ---
+Unique problems in filtered output: 7473
+  (ground-truth available for:       7473)
+Problems with ALL answers correct:   5893
+Problems with ANY answer correct:    6677
+Problems with NO answer correct:     796
