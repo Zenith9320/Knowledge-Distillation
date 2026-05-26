@@ -12,7 +12,7 @@
 | 1 — Teacher 生成 CoT | 用 teacher model 对训练集逐题生成带 CoT 的解答 | ✅ 已完成 |
 | 2 — 答案过滤 | 从 CoT 中提取最终答案，比对 ground-truth，筛除答错的样本 | ✅ 已完成 |
 | 3 — 数据集合并 | 将 GSM8K 和 MATH 正确样本合并打乱，形成统一的 SFT 训练集 | ✅ 已完成 |
-| 4 — Student Fine-tune | 用合并后的 CoT 数据 SFT 小模型 | 待实现 |
+| 4 — Student Fine-tune | 用合并后的 CoT 数据 SFT 小模型（Qwen2.5-0.5B / TinyLlama） | 脚本就绪，待执行 |
 | 5 — 测试评估 | 在测试集上评估 student model 准确率 | 待实现 |
 
 ---
@@ -332,7 +332,7 @@ basic/
 
 ## 第二步补充（改进思路）：自适应采样生成
 
-> **注意**：本节为改进思路，尚未实际执行。
+> **注意**：GSM8K 全量已完成，MATH 尚未执行。
 
 同一 problem 并非都需要同样的采样策略——简单题低温一次即可得出正确答案，难题才需要高温多采样来探索不同的推理路径。自适应采样的目标是根据模型的生成过程自身体现的"确定程度"，按需分配采样算力。
 
@@ -353,7 +353,7 @@ basic/
 
 **迭代式 Round 2 的优势**：每个低置信度 problem 单独追踪置信度变化，一旦某轮追加采样后达到阈值就停止，避免对已经找到高置信度推理路径的 problem 继续浪费采样。例如 300 个低置信度 problem 可能第 1 轮就有 200 个达标，仅剩 100 个继续下一轮。
 
-### 使用方法（预期）
+### 使用方法
 
 ```bash
 # 默认参数运行
@@ -368,6 +368,24 @@ python generate_CoT_adaptive.py --t_low 0.2 --n_low 5 --t_high 1.0 --n_per_iter 
 # 调整 logprob 阈值（越接近 0 越严格，越负越宽松）
 python generate_CoT_adaptive.py --logprob_threshold -1.5
 ```
+
+### 运行结果（GSM8K 全量）
+
+```bash
+python generate_CoT_adaptive.py --dataset gsm8k --gpu_memory_utilization 0.75
+```
+
+耗时约 1 小时 35 分钟（WSL2，8 GiB VRAM，vLLM 批量推理）。
+
+| 统计项 | 数值 |
+|--------|------|
+| 总 problem 数 | 7,473 |
+| Round 1 高置信度 | 7,473 / 7,473（100%） |
+| 触发 Round 2 迭代 | 0 |
+| 总生成答案数 | 22,419（7,473 × 3） |
+| 输出文件 | `data/gsm8k_train_cot_adaptive.jsonl` |
+
+全部 7,473 题在 Round 1（`T=0.3`, `n_low=3`）即达到 logprob 阈值（`-1.8`），无需进入高温迭代轮次。这说明在默认阈值下，低温采样已为全部 GSM8K 题目产生高置信度的推理路径。Round 2 机制更多是为 MATH 等更难的数据集预留——MATH 题目难度更高、模型不确定性更大，更可能需要高温迭代采样。
 
 ### 命令行参数
 
@@ -411,9 +429,7 @@ python generate_CoT_adaptive.py --logprob_threshold -1.5
 ```
 generate_CoT_adaptive.py          → 自适应采样，输出多候选答案
     ↓
-deduplicate_by_similarity.py      → embedding 去重，剔除高度相似的冗余答案
-    ↓
-filter.py                         → boxed 提取 + 答案比对，输出正确样本用于 SFT
+filter_adaptive.py                → 按 problem 匹配 ground-truth，boxed 提取 + 答案比对，输出正确样本
 ```
 
 ### 相关文件
@@ -421,13 +437,126 @@ filter.py                         → boxed 提取 + 答案比对，输出正确
 ```
 basic/
 ├── data/
-│   ├── gsm8k_train_cot_adaptive.jsonl     # 输出：GSM8K 自适应采样结果
-│   └── math_train_cot_adaptive.jsonl      # 输出：MATH 自适应采样结果
-├── generate_CoT_adaptive.py                # 自适应采样脚本
+│   ├── gsm8k_train_cot_adaptive.jsonl              # 输出：GSM8K 自适应采样结果
+│   ├── gsm8k_train_cot_adaptive_filtered.jsonl     # 输出：追加 final_answer 字段（全部样本）
+│   ├── gsm8k_train_cot_adaptive_correct.jsonl      # 输出：比对正确的样本
+│   ├── gsm8k_train_cot_adaptive_incorrect.jsonl    # 输出：非空但比对错误的样本
+│   ├── gsm8k_train_cot_adaptive_bad.jsonl          # 输出：final_answer 为空的样本
+│   ├── gsm8k_adaptive_comparison_report.txt        # 输出：答案比对统计报告
+│   └── math_train_cot_adaptive.jsonl               # 输出：MATH 自适应采样结果
+├── generate_CoT_adaptive.py                         # 自适应采样脚本
+├── filter_adaptive.py                               # 自适应采样专用过滤脚本
 └── README.md
 ```
 
 ---
+
+## 第二步补充：自适应采样答案过滤
+
+`filter_adaptive.py` 是 `filter.py` 的变体，专为自适应采样的多候选输出设计。核心区别在于 **按 problem 文本匹配 ground-truth**（而非逐行 zip），因为每个 problem 有多个候选答案。
+
+### 实现思路
+
+| 步骤 | 说明 |
+|------|------|
+| 1. 加载 ground-truth | 将 ground-truth JSONL 构建为 `problem → answer` 字典 |
+| 2. 逐行处理 | 对自适应输出的每一行，按 problem 文本查找对应的 ground-truth |
+| 3. Boxed 提取 | 复用 `filter.py` 的提取 + 清洗逻辑（GSM8K/MATH 两种模式） |
+| 4. 答案比对 | 数值比对（GSM8K）或字符串比对（MATH），判断 `is_correct` |
+| 5. 分类输出 | 正确 / 错误（非空但不匹配）/ 不合格（空答案）分文件输出 |
+| 6. 统计报告 | 样本级 + problem 级统计，含 per-round 分布 |
+
+**Problem 级统计**是自适应过滤独有的价值——同一个 problem 的多个候选答案中，可能部分正确、部分错误。报告会统计：
+- 有多少 problem **全部候选**都正确
+- 有多少 problem **至少有一个**正确候选
+- 有多少 problem **全部候选**都错误
+
+### 使用方法
+
+```bash
+# GSM8K 模式（默认）
+python filter_adaptive.py \
+    -i data/gsm8k_train_cot_adaptive.jsonl \
+    -g data/gsm8k_train.jsonl \
+    -o data/gsm8k_train_cot_adaptive_filtered.jsonl \
+    -c data/gsm8k_train_cot_adaptive_correct.jsonl \
+    -w data/gsm8k_train_cot_adaptive_incorrect.jsonl \
+    -b data/gsm8k_train_cot_adaptive_bad.jsonl \
+    -r data/gsm8k_adaptive_comparison_report.txt
+
+# MATH 模式
+python filter_adaptive.py --math \
+    -i data/math_train_cot_adaptive.jsonl \
+    -g data/math_train.jsonl \
+    -o data/math_train_cot_adaptive_filtered.jsonl \
+    -c data/math_train_cot_adaptive_correct.jsonl \
+    -w data/math_train_cot_adaptive_incorrect.jsonl \
+    -b data/math_train_cot_adaptive_bad.jsonl \
+    -r data/math_adaptive_comparison_report.txt
+```
+
+### 命令行参数
+
+| 参数 | 说明 |
+|------|------|
+| `-i` / `--input` | 自适应采样 CoT JSONL（含 `temperature`、`round`、`sample_idx`） |
+| `-g` / `--ground_truth` | Ground-truth JSONL 文件（按 problem 文本匹配） |
+| `-o` / `--output` | 过滤后的输出（全部样本，追加 `final_answer`、`ground_truth`、`is_correct`） |
+| `-c` / `--correct_output` | 比对正确的样本输出 |
+| `-w` / `--incorrect_output` | 非空但比对错误的样本输出 |
+| `-b` / `--bad_output` | `final_answer` 为空的样本输出 |
+| `-r` / `--report` | 统计报告输出路径 |
+| `--math` | MATH 模式：保留 LaTeX，字符串比对 |
+
+### 输出格式
+
+```json
+{
+  "problem": "Natalia sold clips to 48 of her friends...",
+  "answer": "**Solution:** ... \\boxed{72}",
+  "temperature": 0.3,
+  "round": 1,
+  "sample_idx": 0,
+  "final_answer": "72",
+  "ground_truth": "72",
+  "is_correct": true
+}
+```
+
+### 运行结果（GSM8K 全量）
+
+| 统计项 | 数值 | 对比原始 filter.py（单次 T=0.6） |
+|--------|------|----------------------------------|
+| 总样本数 | 22,419 | 7,473 |
+| `final_answer` 为空 | 433（1.9%） | 163（2.2%） |
+| `final_answer` 非数值 | 55（0.2%） | 16（0.2%） |
+| 合法数值（valid） | 21,931（97.8%） | 7,294（97.6%） |
+| 比对正确 | 18,916（84.4%） | 6,298（84.3%） |
+| **样本级准确率** | **84.37%** | **84.28%** |
+| **合法数值准确率** | **86.25%** | **86.34%** |
+
+样本级准确率与原始单次采样几乎一致，说明低温（T=0.3）的答案质量没有因温度降低而退化。
+
+**Problem 级统计（自适应特有）：**
+
+| 统计项 | 数值 |
+|--------|------|
+| 唯一 problem 数 | 7,473 |
+| **全部 3 个候选均正确** | 5,557（74.4%） |
+| **至少 1 个候选正确** | 6,934（92.8%） |
+| **全部候选均错误** | 539（7.2%） |
+
+92.8% 的问题至少有一个正确答案，相比单次采样的 84.3% 提升了约 8.5 个百分点。这意味着后续通过 majority voting 或 answer selection，有潜力将有效准确率推到接近 93%。
+
+### 输出文件
+
+| 参数 | 输出文件 | 条数 |
+|------|----------|------|
+| `-o` | `gsm8k_train_cot_adaptive_filtered.jsonl` | 22,419 |
+| `-c` | `gsm8k_train_cot_adaptive_correct.jsonl` | 18,916 |
+| `-w` | `gsm8k_train_cot_adaptive_incorrect.jsonl` | 3,070 |
+| `-b` | `gsm8k_train_cot_adaptive_bad.jsonl` | 433 |
+| `-r` | `gsm8k_adaptive_comparison_report.txt` | — |
 
 ## 第三步：答案过滤（已完成）
 
@@ -829,10 +958,97 @@ basic/
 
 ---
 
+## 第五步：Student SFT 微调（脚本就绪）
+
+用合并后的 CoT 正确样本对较小的 student model 进行监督微调（SFT），让 student 模仿 teacher 的逐步推理过程。支持全量微调和 LoRA 两种模式。
+
+### 实现思路
+
+| 组件 | 说明 |
+|------|------|
+| Student model | 默认 `Qwen2.5-0.5B-Instruct`（0.5B 参数），也可选 `TinyLlama-1.1B-Chat-v1.0` |
+| 训练目标 | 标准因果语言模型 loss，仅对 assistant 回复部分计算 loss（prompt token 用 `-100` 屏蔽） |
+| Chat 格式 | 使用 tokenizer 内置 chat template：system → user (problem) → assistant (CoT answer) |
+| 精度 | bfloat16 混合精度，减少显存占用 |
+| 显存优化 | 支持 LoRA（`--lora`），将可训参数压缩到 ~1%，适合小显存 GPU；全量训练开启 gradient checkpointing |
+
+**Prompt 格式**（与 teacher 生成时一致）：
+
+```
+System: You are a math expert. Solve the problem step by step, showing your
+        reasoning clearly. Put your final numeric answer in \boxed{}.
+User:   Problem: {problem}
+Assistant: {CoT answer — training target}
+```
+
+**Label masking 策略**：将 system + user 部分的 token label 设为 `-100`，只有 assistant 回复的 token 参与 loss 计算。这确保模型学习的是"给定问题 → 产生推理过程"，而非死记 prompt 模板。
+
+### 使用方法（预期）
+
+```bash
+# 全量微调（默认 Qwen2.5-0.5B-Instruct）
+python finetune_student.py
+
+# LoRA 微调（显存不足时使用）
+python finetune_student.py --lora
+
+# 使用 TinyLlama，调整超参数
+python finetune_student.py --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
+                            --epochs 5 --batch_size 2 --lr 1e-5 --lora
+
+# 指定自定义数据和输出路径
+python finetune_student.py --data data/train_cot_correct_merged.jsonl \
+                            --output models/qwen-sft-math
+```
+
+### 命令行参数
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--model` | `Qwen/Qwen2.5-0.5B-Instruct` | Student model 名称或路径 |
+| `--data` | `data/train_cot_correct_merged.jsonl` | 训练数据路径 |
+| `--output` | `models/student-sft` | 模型输出目录 |
+| `--lora` | `False` | 启用 LoRA 微调 |
+| `--epochs` | `3` | 训练轮数 |
+| `--batch_size` | `4` | 每卡训练 batch size |
+| `--gradient_accumulation` | `4` | 梯度累积步数（有效 batch = batch_size × accumulation） |
+| `--lr` | `2e-5` | 学习率 |
+| `--max_length` | `1024` | 训练样本最大 token 长度 |
+| `--warmup_ratio` | `0.05` | 学习率 warmup 比例 |
+| `--weight_decay` | `0.01` | 权重衰减 |
+| `--save_steps` | `500` | 每 N 步保存 checkpoint |
+| `--eval_split` | `0.05` | 验证集比例 |
+
+### 输出
+
+```
+models/student-sft/
+├── config.json                 # 模型配置
+├── model.safetensors           # 微调后权重（或 LoRA adapter）
+├── tokenizer.json              # tokenizer
+├── training_args.bin           # 训练参数记录
+└── checkpoint-*/               # 中间 checkpoint
+```
+
+### 相关文件
+
+```
+basic/
+├── data/
+│   └── train_cot_correct_merged.jsonl    # 输入：合并后的训练集
+├── models/
+│   └── student-sft/                       # 输出：微调后的 student model
+├── finetune_student.py                    # SFT 微调脚本
+└── README.md
+```
+
+---
+
 ## 后续工作
 
 | 阶段 | 说明 |
 |------|------|
-| Student Fine-tune | 用 `data/train_cot_correct_merged.jsonl`（11,639 条）对较小的 student model 进行监督微调（SFT） |
+| Student Fine-tune | 用合并后的 CoT 数据 SFT 小模型（Qwen2.5-0.5B / TinyLlama） |
+| MATH 自适应采样 | 对 MATH 数据集运行 `generate_CoT_adaptive.py --dataset math`，MATH 难度更高更可能触发 Round 2 迭代 |
 | 测试评估 | 在 `data/gsm8k_test.jsonl` 和 `data/math_test.jsonl` 上评估微调后的 student model 准确率，并与 teacher / 未微调 baseline 对比 |
 | 准确率提升 | 探索改进 teacher model 生成质量（更好的 prompt、更大的模型、增加生成长度），以降低 MATH 30.1% 的空答案率和提升整体正确率 |
