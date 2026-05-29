@@ -1026,8 +1026,27 @@ basic/
 │   ├── math_train_cot_correct.jsonl         # 输入：MATH 正确样本
 │   └── train_cot_correct_merged.jsonl       # 输出：合并打乱后的训练集
 ├── merge_datasets.py                         # 合并脚本
+├── shuffle_jsonl.py                          # 通用 JSONL 打乱工具（独立使用）
 └── README.md
 ```
+
+### 独立打乱工具（shuffle_jsonl.py）
+
+除 `merge_datasets.py` 内置的 shuffle 功能外，还提供一个独立的通用 JSONL 打乱脚本，适用于任意 JSONL 文件的顺序随机化：
+
+```bash
+# 基本用法
+python shuffle_jsonl.py data/math_train_cot_adaptive.jsonl -o data/math_train_cot_adaptive_shuffled.jsonl
+
+# 自定义随机种子（默认 42）
+python shuffle_jsonl.py input.jsonl -o output.jsonl -s 123
+```
+
+| 参数 | 说明 |
+|------|------|
+| `input` | 输入 JSONL 文件路径（必填） |
+| `-o` / `--output` | 输出 JSONL 文件路径（必填） |
+| `-s` / `--seed` | 随机种子（默认 `42`），用于可复现结果 |
 
 ---
 
