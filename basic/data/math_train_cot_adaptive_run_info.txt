@@ -1,0 +1,160 @@
+MATH Train CoT Adaptive — Run Information
+============================================================
+
+Total data records across all parts: 33744
+Total parts: 10
+
+========== Part 1 (math_train_cot_adaptive_1.jsonl) ==========
+Data records: 3387
+Run info lines: 13
+
+(EngineCore pid=245625) WARNING 05-27 19:42:50 [jit_monitor.py:103] Triton kernel JIT compilation during inference: _topk_topp_kernel. This causes a latency spike; consider extending warmup to cover this shape/config.
+Processed prompts: 100%|████████████| 3387/3387 [53:35<00:00,  1.05it/s, est. speed input: 112.66 toks/s, output: 1610.35 toks/s]
+  High confidence: 1129/1129 (100.0%)
+  Low confidence:  0/1129 — will iterate in Round 2+
+
+Writing 3387 records to /home/entong/Knowledge-Distillation/basic/data/math_train_cot_adaptive.jsonl ...
+  Done.  Total: 3387 answers, avg 3.0 samples/problem
+  Output: /home/entong/Knowledge-Distillation/basic/data/math_train_cot_adaptive.jsonl
+
+All done.
+(EngineCore pid=245625) INFO 05-27 20:36:28 [core.py:1242] Shutdown initiated (timeout=0)
+(EngineCore pid=245625) INFO 05-27 20:36:28 [core.py:1265] Shutdown complete
+[rank0]:[W527 20:36:29.242398995 ProcessGroupNCCL.cpp:1575] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+
+
+========== Part 2 (math_train_cot_adaptive_2.jsonl) ==========
+Data records: 3477
+Run info lines: 9
+
+Processed prompts: 100%|███████████| 3477/3477 [1:52:45<00:00,  1.95s/it, est. speed input: 53.57 toks/s, output: 1168.07 toks/s]
+  High confidence: 1159/1159 (100.0%)
+  Low confidence:  0/1159 — will iterate in Round 2+
+
+Writing 3477 records to /home/entong/Knowledge-Distillation/basic/data/math_train_cot_adaptive.jsonl ...
+  Done.  Total: 3477 answers, avg 3.0 samples/problem
+  Output: /home/entong/Knowledge-Distillation/basic/data/math_train_cot_adaptive.jsonl
+
+All done.
+
+
+========== Part 3 (math_train_cot_adaptive_3.jsonl) ==========
+Data records: 3408
+Run info lines: 9
+
+Processed prompts: 100%|███████████| 3408/3408 [1:45:59<00:00,  1.87s/it, est. speed input: 56.72 toks/s, output: 1220.73 toks/s]
+  High confidence: 1136/1136 (100.0%)
+  Low confidence:  0/1136 — will iterate in Round 2+
+
+Writing 3408 records to /home/entong/Knowledge-Distillation/basic/data/math_train_cot_adaptive.jsonl ...
+  Done.  Total: 3408 answers, avg 3.0 samples/problem
+  Output: /home/entong/Knowledge-Distillation/basic/data/math_train_cot_adaptive.jsonl
+
+All done.
+
+
+========== Part 4 (math_train_cot_adaptive_4.jsonl) ==========
+Data records: 3285
+Run info lines: 9
+
+Processed prompts: 100%|███████████████████████| 3285/3285 [1:39:38<00:00,  1.82s/it, est. speed input: 61.06 toks/s, output: 1244.91 toks/s]
+  High confidence: 1095/1095 (100.0%)
+  Low confidence:  0/1095 — will iterate in Round 2+
+
+Writing 3285 records to /home/entong/Knowledge-Distillation/basic/data/math_train_cot_adaptive.jsonl ...
+  Done.  Total: 3285 answers, avg 3.0 samples/problem
+  Output: /home/entong/Knowledge-Distillation/basic/data/math_train_cot_adaptive.jsonl
+
+All done.
+
+
+========== Part 5 (math_train_cot_adaptive_5.jsonl) ==========
+Data records: 3393
+Run info lines: 9
+
+Processed prompts: 100%|███████████████████████| 3393/3393 [1:52:03<00:00,  1.98s/it, est. speed input: 53.61 toks/s, output: 1167.93 toks/s]
+  High confidence: 1131/1131 (100.0%)
+  Low confidence:  0/1131 — will iterate in Round 2+
+
+Writing 3393 records to /home/entong/Knowledge-Distillation/basic/data/math_train_cot_adaptive.jsonl ...
+  Done.  Total: 3393 answers, avg 3.0 samples/problem
+  Output: /home/entong/Knowledge-Distillation/basic/data/math_train_cot_adaptive.jsonl
+
+All done.
+
+
+========== Part 6 (math_train_cot_adaptive_6.jsonl) ==========
+Data records: 3345
+Run info lines: 9
+
+Processed prompts: 100%|███████████████████████| 3345/3345 [1:31:57<00:00,  1.65s/it, est. speed input: 64.89 toks/s, output: 1366.88 toks/s]
+  High confidence: 1115/1115 (100.0%)
+  Low confidence:  0/1115 — will iterate in Round 2+
+
+Writing 3345 records to /home/entong/Knowledge-Distillation/basic/data/math_train_cot_adaptive.jsonl ...
+  Done.  Total: 3345 answers, avg 3.0 samples/problem
+  Output: /home/entong/Knowledge-Distillation/basic/data/math_train_cot_adaptive.jsonl
+
+All done.
+
+
+========== Part 7 (math_train_cot_adaptive_7.jsonl) ==========
+Data records: 3336
+Run info lines: 9
+
+Processed prompts: 100%|███████████████████████| 3336/3336 [1:35:20<00:00,  1.71s/it, est. speed input: 63.20 toks/s, output: 1373.81 toks/s]
+  High confidence: 1112/1112 (100.0%)
+  Low confidence:  0/1112 — will iterate in Round 2+
+
+Writing 3336 records to /home/entong/Knowledge-Distillation/basic/data/math_train_cot_adaptive.jsonl ...
+  Done.  Total: 3336 answers, avg 3.0 samples/problem
+  Output: /home/entong/Knowledge-Distillation/basic/data/math_train_cot_adaptive.jsonl
+
+All done.
+
+
+========== Part 8 (math_train_cot_adaptive_8.jsonl) ==========
+Data records: 3297
+Run info lines: 9
+
+Processed prompts: 100%|███████████| 3297/3297 [1:43:06<00:00,  1.88s/it, est. speed input: 57.95 toks/s, output: 1221.15 toks/s]
+  High confidence: 1099/1099 (100.0%)
+  Low confidence:  0/1099 — will iterate in Round 2+
+
+Writing 3297 records to /home/entong/Knowledge-Distillation/basic/data/math_train_cot_adaptive.jsonl ...
+  Done.  Total: 3297 answers, avg 3.0 samples/problem
+  Output: /home/entong/Knowledge-Distillation/basic/data/math_train_cot_adaptive.jsonl
+
+All done.
+
+
+========== Part 9 (math_train_cot_adaptive_9.jsonl) ==========
+Data records: 3378
+Run info lines: 9
+
+Processed prompts: 100%|███████████████████████| 3378/3378 [1:48:04<00:00,  1.92s/it, est. speed input: 55.39 toks/s, output: 1206.21 toks/s]
+  High confidence: 1126/1126 (100.0%)
+  Low confidence:  0/1126 — will iterate in Round 2+
+
+Writing 3378 records to /home/entong/Knowledge-Distillation/basic/data/math_train_cot_adaptive.jsonl ...
+  Done.  Total: 3378 answers, avg 3.0 samples/problem
+  Output: /home/entong/Knowledge-Distillation/basic/data/math_train_cot_adaptive.jsonl
+
+All done.
+
+
+========== Part 10 (math_train_cot_adaptive_10.jsonl) ==========
+Data records: 3438
+Run info lines: 9
+
+Processed prompts: 100%|███████████████████████| 3438/3438 [1:42:13<00:00,  1.78s/it, est. speed input: 57.95 toks/s, output: 1239.55 toks/s]
+  High confidence: 1146/1146 (100.0%)
+  Low confidence:  0/1146 — will iterate in Round 2+
+
+Writing 3438 records to /home/entong/Knowledge-Distillation/basic/data/math_train_cot_adaptive.jsonl ...
+  Done.  Total: 3438 answers, avg 3.0 samples/problem
+  Output: /home/entong/Knowledge-Distillation/basic/data/math_train_cot_adaptive.jsonl
+
+All done.
+
+

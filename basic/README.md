@@ -192,7 +192,7 @@ basic/
 
 ### 2.2 自适应采样生成
 
-> **注意**：GSM8K 全量已完成，MATH 尚未执行。
+> **注意**：GSM8K 和 MATH 全量均已完成。
 
 同一 problem 并非都需要同样的采样策略——简单题低温一次即可得出正确答案，难题才需要高温多采样来探索不同的推理路径。自适应采样的目标是根据模型的生成过程自身体现的"确定程度"，按需分配采样算力。
 
@@ -247,6 +247,42 @@ python generate_CoT_adaptive.py --dataset gsm8k --gpu_memory_utilization 0.75
 
 全部 7,473 题在 Round 1（`T=0.3`, `n_low=3`）即达到 logprob 阈值（`-1.8`），无需进入高温迭代轮次。这说明在默认阈值下，低温采样已为全部 GSM8K 题目产生高置信度的推理路径。Round 2 机制更多是为 MATH 等更难的数据集预留——MATH 题目难度更高、模型不确定性更大，更可能需要高温迭代采样。
 
+#### 运行结果（MATH 全量）
+
+由于 MATH 数据集较大（11,248 题），出于显存管理原因，生成过程分 10 个 part 依次执行，每个 part 处理约 1,100~1,160 个 problem。以下为汇总结果：
+
+```bash
+python generate_CoT_adaptive.py --dataset math --gpu_memory_utilization 0.75
+```
+
+| 统计项 | 数值 |
+|--------|------|
+| 总 problem 数 | 11,248 |
+| Round 1 高置信度 | 11,248 / 11,248（100%） |
+| 触发 Round 2 迭代 | 0 |
+| 每 problem 采样数 | 3（`n_low=3`） |
+| 总生成答案数 | 33,744（11,248 × 3） |
+| 输出文件 | `data/math_train_cot_adaptive.jsonl` |
+
+**各 Part 详情：**
+
+| Part | Problem 数 | 答案数 | 置信度 | 耗时 |
+|------|-----------|--------|--------|------|
+| 1 | 1,129 | 3,387 | 100% 高置信 | ~54 min |
+| 2 | 1,159 | 3,477 | 100% 高置信 | ~1h 53min |
+| 3 | 1,136 | 3,408 | 100% 高置信 | ~1h 46min |
+| 4 | 1,095 | 3,285 | 100% 高置信 | ~1h 40min |
+| 5 | 1,131 | 3,393 | 100% 高置信 | ~1h 52min |
+| 6 | 1,115 | 3,345 | 100% 高置信 | ~1h 32min |
+| 7 | 1,112 | 3,336 | 100% 高置信 | ~1h 35min |
+| 8 | 1,099 | 3,297 | 100% 高置信 | ~1h 43min |
+| 9 | 1,126 | 3,378 | 100% 高置信 | ~1h 48min |
+| 10 | 1,146 | 3,438 | 100% 高置信 | 单独运行 |
+
+与 GSM8K 类似，MATH 全部 11,248 题在 Round 1（`T=0.3`, `n_low=3`）即达到 logprob 阈值（`-1.8`），无需进入高温迭代轮次。尽管 MATH 题目难度高于 GSM8K，teacher model（DeepSeek-R1-Distill-Qwen-1.5B）在低温下仍能对所有题目产生高置信度的推理路径。这表明在默认阈值设置下，logprob 评估模型对自身输出的确定性较高，Round 2 高温迭代机制可能需要更严格的阈值（如 `-1.0`）才能触发。
+
+各 part 运行信息详情见 `data/math_train_cot_adaptive_run_info.txt`。
+
 #### 命令行参数
 
 | 参数 | 默认值 | 说明 |
@@ -290,7 +326,9 @@ python generate_CoT_adaptive.py --dataset gsm8k --gpu_memory_utilization 0.75
 basic/
 ├── data/
 │   ├── gsm8k_train_cot_adaptive.jsonl          # 输出：GSM8K 自适应采样结果
-│   └── math_train_cot_adaptive.jsonl           # 输出：MATH 自适应采样结果
+│   ├── math_train_cot_adaptive_1~10.jsonl       # 输出：MATH 自适应采样各 part 结果（含运行信息）
+│   ├── math_train_cot_adaptive.jsonl            # 输出：MATH 自适应采样结果（合并后，33,744 条）
+│   └── math_train_cot_adaptive_run_info.txt     # 输出：MATH 自适应采样各 part 运行信息汇总
 ├── generate_CoT_adaptive.py                     # 自适应采样脚本
 └── README.md
 ```
@@ -1084,6 +1122,6 @@ basic/
 | 阶段 | 说明 |
 |------|------|
 | Student Fine-tune | 用合并后的 CoT 数据 SFT 小模型（Qwen2.5-0.5B / TinyLlama） |
-| MATH 自适应采样 | 对 MATH 数据集运行 `generate_CoT_adaptive.py --dataset math`，MATH 难度更高更可能触发 Round 2 迭代 |
+| MATH 自适应采样过滤 | 对 MATH 自适应采样生成的 33,744 条候选答案运行 `filter_adaptive.py --math`，提取 boxed 答案并与 ground-truth 比对 |
 | 测试评估 | 在 `data/gsm8k_test.jsonl` 和 `data/math_test.jsonl` 上评估微调后的 student model 准确率，并与 teacher / 未微调 baseline 对比 |
 | 准确率提升 | 探索改进 teacher model 生成质量（更好的 prompt、更大的模型、增加生成长度），以降低 MATH 30.1% 的空答案率和提升整体正确率 |
