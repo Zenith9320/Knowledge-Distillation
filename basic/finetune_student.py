@@ -83,9 +83,11 @@ def tokenize(examples: dict, tokenizer, max_length: int) -> dict:
         # Tokenize prompt to know where to mask
         prompt_tokens = tokenizer.apply_chat_template(
             prompt_messages, tokenize=True, add_generation_prompt=False,
+            return_dict=False,
         )
         full_tokens = tokenizer.apply_chat_template(
             full_messages, tokenize=True, add_generation_prompt=False,
+            return_dict=False,
         )
 
         prompt_len = len(prompt_tokens)
@@ -280,7 +282,7 @@ def main():
         train_dataset=train_ds,
         eval_dataset=eval_ds,
         data_collator=data_collator,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
     )
 
     print("\nStarting training ...")
