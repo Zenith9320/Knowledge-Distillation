@@ -224,6 +224,8 @@ def main():
 
     # 3. Tokenize
     print("Tokenizing ...")
+    # Keep only problem and answer (drop extra fields like type/level to avoid schema conflicts)
+    dataset = dataset.select_columns(["problem", "answer"])
     dataset = dataset.train_test_split(test_size=args.eval_split, seed=42)
     train_ds = dataset["train"]
     eval_ds = dataset["test"]
