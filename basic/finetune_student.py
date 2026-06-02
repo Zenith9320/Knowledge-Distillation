@@ -12,6 +12,12 @@ Usage:
     # LoRA fine-tune (lower memory)
     python finetune_student.py --lora
 
+    # Resume from the latest checkpoint in the output directory
+    python finetune_student.py --resume
+
+    # Resume from a specific checkpoint
+    python finetune_student.py --checkpoint models/student-sft/checkpoint-500
+
     # Custom model and hyperparameters
     python finetune_student.py --model Qwen/Qwen2.5-0.5B-Instruct \\
                                --epochs 5 --batch_size 8 --lr 2e-5
@@ -212,6 +218,14 @@ def main():
         "--eval_split", type=float, default=0.05,
         help="Fraction of data to use for eval (default: 0.05)",
     )
+    parser.add_argument(
+        "--resume", action="store_true",
+        help="Resume training from the latest checkpoint in the output directory",
+    )
+    parser.add_argument(
+        "--checkpoint",
+        help="Resume training from a specific checkpoint directory (overrides --resume)",
+    )
     args = parser.parse_args()
 
     # 1. Load dataset
@@ -287,8 +301,17 @@ def main():
         processing_class=tokenizer,
     )
 
+    # Resolve checkpoint path
+    checkpoint = None
+    if args.checkpoint:
+        checkpoint = args.checkpoint
+    elif args.resume:
+        checkpoint = True  # Auto-find latest in output_dir
+
     print("\nStarting training ...")
-    trainer.train()
+    if checkpoint:
+        print(f"  Resuming from checkpoint: {checkpoint if isinstance(checkpoint, str) else 'auto (latest)'}")
+    trainer.train(resume_from_checkpoint=checkpoint)
 
     # 5. Save
     print(f"\nSaving model to {args.output} ...")
