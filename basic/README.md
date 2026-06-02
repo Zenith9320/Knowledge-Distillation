@@ -12,8 +12,8 @@
 | 1 — Teacher 生成 CoT | 用 teacher model 对训练集逐题生成带 CoT 的解答（vLLM 批量 / 自适应采样两种方式） | ✅ 已完成 |
 | 2 — 答案过滤 | 从 CoT 中提取最终答案，比对 ground-truth，筛除答错的样本（标准 / 自适应两种方式） | ✅ 已完成 |
 | 3 — 数据集合并 | 将 GSM8K 和 MATH 正确样本合并打乱，形成统一的 SFT 训练集 | ✅ 已完成 |
-| 4 — Student Fine-tune | 用合并后的 CoT 数据 SFT 小模型（Qwen2.5-0.5B / TinyLlama） | 脚本就绪，待执行 |
-| 5 — 测试评估 | 在测试集上评估 student model 准确率 | 待实现 |
+| 4 — Student Fine-tune | 用合并后的 CoT 数据 SFT 小模型（Qwen2.5-0.5B / TinyLlama） | ✅ 已完成 |
+| 5 — 测试评估 | 在测试集上评估 student model 准确率，与 baseline 对比 | ✅ 已完成 |
 
 ---
 
@@ -1050,7 +1050,7 @@ python shuffle_jsonl.py input.jsonl -o output.jsonl -s 123
 
 ---
 
-## 第五步：Student SFT 微调（脚本就绪，支持 checkpoint 恢复）
+## 第五步：Student SFT 微调（已完成）
 
 用合并后的 CoT 正确样本对较小的 student model 进行监督微调（SFT），让 student 模仿 teacher 的逐步推理过程。支持全量微调和 LoRA 两种模式。
 
@@ -1076,7 +1076,7 @@ Assistant: {CoT answer — training target}
 
 **Label masking 策略**：将 system + user 部分的 token label 设为 `-100`，只有 assistant 回复的 token 参与 loss 计算。这确保模型学习的是"给定问题 → 产生推理过程"，而非死记 prompt 模板。
 
-### 使用方法（预期）
+### 使用方法
 
 ```bash
 # 全量微调（默认 Qwen2.5-0.5B-Instruct）
@@ -1145,11 +1145,131 @@ basic/
 
 ---
 
+## 第六步：测试评估（已完成）
+
+用测试集评估微调后的 student model，统计准确率。`evaluate.py` 复用 `filter.py` 的答案提取和比对逻辑，确保评估方式与训练数据过滤阶段一致。
+
+### 实现思路
+
+| 组件 | 说明 |
+|------|------|
+| 模型加载 | 支持 HuggingFace hub 模型名或本地 `models/` 目录下的已保存模型（含 checkpoint） |
+| Prompt 格式 | 与训练完全一致：`system`（SYSTEM_PROMPT） + `user`（`Problem: {problem}`） wrapped in chat template |
+| 生成参数 | `temperature=0.6`, `top_p=0.95`, `max_new_tokens=2048`（MATH 可调到 4096） |
+| 答案提取 | 复用 `filter.py` 的三级回退链：`\boxed{}` → `**Answer:**` → 末尾数字（仅 GSM8K） |
+| 答案比对 | GSM8K：数值比对（容差 `1e-9`）；MATH：字符串比对（空白符归一化） |
+| 分类统计 | MATH 按 `type`（Algebra、Geometry 等）和 `level`（Level 1-5）分类报告 |
+
+### 使用方法
+
+```bash
+# 评估已微调模型（GSM8K）
+python evaluate.py --model models/qwen-adaptive --dataset gsm8k
+
+# 评估 MATH 测试集（增加生成长度）
+python evaluate.py --model models/qwen-double_temp --dataset math --max_new_tokens 4096
+
+# 两个数据集一起评估
+python evaluate.py --model models/qwen-adaptive --dataset both
+
+# 评估未微调的 baseline（直接拉 HuggingFace）
+python evaluate.py --model Qwen/Qwen2.5-0.5B-Instruct --dataset gsm8k
+
+# 快速测试 20 条
+python evaluate.py --model models/qwen-adaptive --dataset gsm8k --max_samples 20
+
+# 打印每道题的预测结果
+python evaluate.py --model models/qwen-adaptive --dataset gsm8k --max_samples 10 -v
+
+# 预测结果和报告写入文件（评估 both 时自动加 _gsm8k / _math 后缀）
+python evaluate.py --model models/qwen-adaptive --dataset both \
+    -o results/predictions.jsonl \
+    -r results/report.txt
+```
+
+### 命令行参数
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--model` | （必填） | 模型路径（本地目录或 HuggingFace hub 名称） |
+| `--dataset` | `gsm8k` | 数据集：`gsm8k`、`math` 或 `both` |
+| `--max_samples` | `None`（全部） | 限制评估前 N 条样本 |
+| `--max_new_tokens` | `2048` | 生成最大 token 数 |
+| `--temperature` | `0.6` | 采样温度 |
+| `--top_p` | `0.95` | Nucleus sampling top-p |
+| `--clean_tags` | `False` | 剥离 `<think>...</think>` 标签（用于 DeepSeek-R1 teacher model） |
+| `--verbose` / `-v` | `False` | 逐条打印预测 vs ground-truth |
+| `--output` / `-o` | — | 预测结果写入 JSONL 文件（含 `problem`、`generated`、`final_answer`、`ground_truth`、`is_correct`） |
+| `--report` / `-r` | — | 统计报告写入文本文件 |
+
+### 输出
+
+**终端输出** — 每次运行都会打印完整报告：
+
+```
+============================================================
+GSM8K Evaluation Results
+============================================================
+Model: models/qwen-adaptive
+Samples: 1319
+
+--- Sample-level ---
+  Correct:                1123   (85.1%)
+  Empty final_answer:     42     (3.2%)
+  Non-numeric:            8      (0.6%)
+  Valid (non-empty):      1269   (96.2%)
+
+Accuracy (correct / total):         85.14%
+Accuracy (correct / valid):         88.49%
+
+--- By Type ---       (MATH only)
+--- By Level ---      (MATH only)
+```
+
+**`--output` JSONL** — 每行一条，含完整生成结果和比对标记：
+
+```json
+{
+  "problem": "Janet's ducks lay 16 eggs per day...",
+  "ground_truth": "18",
+  "generated": "Let's solve step by step... \\boxed{18}",
+  "final_answer": "18",
+  "is_correct": true,
+  "type": "Algebra",
+  "level": "Level 3"
+}
+```
+
+### 本地已训练模型
+
+| 模型 | 路径 | 训练数据 | 说明 |
+|------|------|----------|------|
+| qwen-adaptive | `models/qwen-adaptive` | 自适应采样正确样本 | Qwen2.5-0.5B，3 epochs |
+| qwen-double_temp | `models/qwen-double_temp` | 双温度去重后正确样本 | Qwen2.5-0.5B，3 epochs |
+| qwen-single_temp | `models/qwen-single_temp` | 单温度（T=0.6）正确样本 | Qwen2.5-0.5B，3 epochs |
+
+### 相关文件
+
+```
+basic/
+├── data/
+│   ├── gsm8k_test.jsonl                       # 输入：GSM8K 测试集（1,319 条）
+│   └── math_test.jsonl                        # 输入：MATH 测试集（1,250 条）
+├── models/
+│   ├── qwen-adaptive/                          # 输入：自适应采样训练模型
+│   ├── qwen-double_temp/                       # 输入：双温度训练模型
+│   └── qwen-single_temp/                       # 输入：单温度训练模型
+├── evaluate.py                                 # 评估脚本
+├── filter.py                                   # 被复用的答案提取和比对逻辑
+└── README.md
+```
+
+---
+
 ## 后续工作
 
 | 阶段 | 说明 |
 |------|------|
-| Student Fine-tune | 用合并后的 CoT 数据 SFT 小模型（Qwen2.5-0.5B / TinyLlama） |
+| 准确率提升 | 探索改进 teacher model 生成质量（更好的 prompt、更大的模型、增加生成长度），以降低 MATH 空答案率 |
 | MATH 自适应采样过滤 | 对 MATH 自适应采样生成的 33,744 条候选答案运行 `filter_adaptive.py --math`，提取 boxed 答案并与 ground-truth 比对 |
-| 测试评估 | 在 `data/gsm8k_test.jsonl` 和 `data/math_test.jsonl` 上评估微调后的 student model 准确率，并与 teacher / 未微调 baseline 对比 |
-| 准确率提升 | 探索改进 teacher model 生成质量（更好的 prompt、更大的模型、增加生成长度），以降低 MATH 30.1% 的空答案率和提升整体正确率 |
+| 多候选投票 | 利用自适应采样的多候选结果，通过 majority voting 提升最终准确率 |
