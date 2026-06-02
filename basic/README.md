@@ -1050,7 +1050,7 @@ python shuffle_jsonl.py input.jsonl -o output.jsonl -s 123
 
 ---
 
-## 第五步：Student SFT 微调（脚本就绪）
+## 第五步：Student SFT 微调（脚本就绪，支持 checkpoint 恢复）
 
 用合并后的 CoT 正确样本对较小的 student model 进行监督微调（SFT），让 student 模仿 teacher 的逐步推理过程。支持全量微调和 LoRA 两种模式。
 
@@ -1063,6 +1063,7 @@ python shuffle_jsonl.py input.jsonl -o output.jsonl -s 123
 | Chat 格式 | 使用 tokenizer 内置 chat template：system → user (problem) → assistant (CoT answer) |
 | 精度 | bfloat16 混合精度，减少显存占用 |
 | 显存优化 | 支持 LoRA（`--lora`），将可训参数压缩到 ~1%，适合小显存 GPU；全量训练开启 gradient checkpointing |
+| 断点续训 | 默认每 500 步保存 checkpoint 到 `output_dir/checkpoint-*/`；通过 `--resume` 自动恢复最新 checkpoint，或 `--checkpoint` 指定路径恢复 |
 
 **Prompt 格式**（与 teacher 生成时一致）：
 
@@ -1083,6 +1084,12 @@ python finetune_student.py
 
 # LoRA 微调（显存不足时使用）
 python finetune_student.py --lora
+
+# 从 output 目录下最新的 checkpoint 恢复训练
+python finetune_student.py --resume
+
+# 从指定的 checkpoint 恢复训练
+python finetune_student.py --checkpoint models/student-sft/checkpoint-500
 
 # 使用 TinyLlama，调整超参数
 python finetune_student.py --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
@@ -1110,6 +1117,8 @@ python finetune_student.py --data data/train_cot_correct_merged.jsonl \
 | `--weight_decay` | `0.01` | 权重衰减 |
 | `--save_steps` | `500` | 每 N 步保存 checkpoint |
 | `--eval_split` | `0.05` | 验证集比例 |
+| `--resume` | `False` | 从 output 目录下最新的 checkpoint 自动恢复训练 |
+| `--checkpoint` | — | 从指定 checkpoint 路径恢复训练（优先级高于 `--resume`） |
 
 ### 输出
 
