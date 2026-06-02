@@ -427,6 +427,16 @@ def generate_answer(
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _suffix_path(path: str, dataset: str) -> str:
+    """Insert dataset name before the file extension: report.txt -> report_gsm8k.txt."""
+    base, ext = os.path.splitext(path)
+    return f"{base}_{dataset}{ext}"
+
+
+# ---------------------------------------------------------------------------
 # Evaluation
 # ---------------------------------------------------------------------------
 
@@ -439,6 +449,8 @@ def evaluate(
     top_p: float = 0.95,
     clean_tags: bool = False,
     verbose: bool = False,
+    output: str | None = None,
+    report_path: str | None = None,
 ):
     """Evaluate a model on a test dataset and report accuracy.
 
@@ -451,6 +463,8 @@ def evaluate(
         top_p: Nucleus sampling top-p.
         clean_tags: Strip <think>...</think> (for DeepSeek-R1 models).
         verbose: Print per-sample results (problem, predicted, ground truth).
+        output: If set, write all predictions as JSONL to this path.
+        report_path: If set, write the accuracy report to this file.
 
     Returns:
         dict: Accuracy statistics per dataset.
@@ -467,6 +481,8 @@ def evaluate(
                 top_p=top_p,
                 clean_tags=clean_tags,
                 verbose=verbose,
+                output=_suffix_path(output, ds) if output else None,
+                report_path=_suffix_path(report_path, ds) if report_path else None,
             )
         return results
 
@@ -501,6 +517,7 @@ def evaluate(
     non_numeric = 0
     correct = 0
     valid = 0
+    all_results = []  # Collect all results for file output
 
     # Per-category stats (MATH)
     type_stats = {}
@@ -546,6 +563,19 @@ def evaluate(
                         is_correct = True
 
         total += 1
+
+        # Collect result record
+        result_record = {
+            "problem": problem,
+            "ground_truth": gt,
+            "generated": generated,
+            "final_answer": fa,
+            "is_correct": is_correct,
+        }
+        for key in ("type", "level"):
+            if key in record:
+                result_record[key] = record[key]
+        all_results.append(result_record)
 
         # Per-category tracking
         rec_type = str(record.get("type", ""))
@@ -626,6 +656,20 @@ Accuracy (correct / valid):         {valid_accuracy:.2f}%
 
     print(report)
 
+    # ---- Write output files ----
+    if output:
+        os.makedirs(os.path.dirname(output) or ".", exist_ok=True)
+        with open(output, "w", encoding="utf-8") as f:
+            for rec in all_results:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        print(f"Predictions written to: {output}")
+
+    if report_path:
+        os.makedirs(os.path.dirname(report_path) or ".", exist_ok=True)
+        with open(report_path, "w", encoding="utf-8") as f:
+            f.write(report)
+        print(f"Report written to: {report_path}")
+
     return {
         "dataset": dataset,
         "total": total,
@@ -678,6 +722,14 @@ def main():
         "--verbose", "-v", action="store_true",
         help="Print per-sample predictions",
     )
+    parser.add_argument(
+        "--output", "-o", default=None,
+        help="Write all predictions as JSONL to this path",
+    )
+    parser.add_argument(
+        "--report", "-r", default=None,
+        help="Write the accuracy report to this file",
+    )
     args = parser.parse_args()
 
     evaluate(
@@ -689,6 +741,8 @@ def main():
         top_p=args.top_p,
         clean_tags=args.clean_tags,
         verbose=args.verbose,
+        output=args.output,
+        report_path=args.report,
     )
 
 
