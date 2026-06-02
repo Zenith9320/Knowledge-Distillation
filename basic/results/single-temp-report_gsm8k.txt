@@ -1,0 +1,15 @@
+
+============================================================
+GSM8K Evaluation Results
+============================================================
+Model: models/qwen-single_temp
+Samples: 1319
+
+--- Sample-level ---
+  Correct:                513   (38.9%)
+  Empty final_answer:     2   (0.2%)
+  Non-numeric:            11    (0.8%)
+  Valid (non-empty):      1306   (99.0%)
+
+Accuracy (correct / total):         38.89%
+Accuracy (correct / valid):         39.28%
