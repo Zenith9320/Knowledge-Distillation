@@ -374,7 +374,7 @@ def generate_answer(
     model,
     tokenizer,
     problem: str,
-    max_new_tokens: int = 2048,
+    max_new_tokens: int = 4096,
     temperature: float = 0.6,
     top_p: float = 0.95,
     clean_tags: bool = False,
@@ -444,7 +444,7 @@ def evaluate(
     model_path: str,
     dataset: str = "gsm8k",
     max_samples: int | None = None,
-    max_new_tokens: int = 2048,
+    max_new_tokens: int = 4096,
     temperature: float = 0.6,
     top_p: float = 0.95,
     clean_tags: bool = False,
@@ -703,8 +703,8 @@ def main():
         help="Limit to first N samples (default: all)",
     )
     parser.add_argument(
-        "--max_new_tokens", type=int, default=2048,
-        help="Maximum tokens to generate (default: 2048)",
+        "--max_new_tokens", type=int, default=4096,
+        help="Maximum tokens to generate (default: 4096)",
     )
     parser.add_argument(
         "--temperature", type=float, default=0.6,
