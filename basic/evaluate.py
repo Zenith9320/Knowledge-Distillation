@@ -378,6 +378,7 @@ def generate_answer(
     temperature: float = 0.6,
     top_p: float = 0.95,
     clean_tags: bool = False,
+    system_prompt: str | None = None,
 ) -> str:
     """Generate a CoT answer for a single problem.
 
@@ -389,12 +390,15 @@ def generate_answer(
         temperature: Sampling temperature.
         top_p: Nucleus sampling top-p.
         clean_tags: If True, strip <think>...</think> tags (for DeepSeek-R1 models).
+        system_prompt: Override the default system prompt. If None, uses SYSTEM_PROMPT.
+            Pass an empty string "" for no system prompt.
 
     Returns:
         Generated text (only the new tokens, not the prompt).
     """
+    sp = SYSTEM_PROMPT if system_prompt is None else system_prompt
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": sp},
         {"role": "user", "content": f"Problem: {problem}"},
     ]
 
@@ -451,6 +455,7 @@ def evaluate(
     verbose: bool = False,
     output: str | None = None,
     report_path: str | None = None,
+    system_prompt: str | None = None,
 ):
     """Evaluate a model on a test dataset and report accuracy.
 
@@ -465,6 +470,7 @@ def evaluate(
         verbose: Print per-sample results (problem, predicted, ground truth).
         output: If set, write all predictions as JSONL to this path.
         report_path: If set, write the accuracy report to this file.
+        system_prompt: Override system prompt. None = default. "" = no system prompt.
 
     Returns:
         dict: Accuracy statistics per dataset.
@@ -483,6 +489,7 @@ def evaluate(
                 verbose=verbose,
                 output=_suffix_path(output, ds) if output else None,
                 report_path=_suffix_path(report_path, ds) if report_path else None,
+                system_prompt=system_prompt,
             )
         return results
 
@@ -534,6 +541,7 @@ def evaluate(
             temperature=temperature,
             top_p=top_p,
             clean_tags=clean_tags,
+            system_prompt=system_prompt,
         )
 
         # Extract final answer
@@ -730,6 +738,11 @@ def main():
         "--report", "-r", default=None,
         help="Write the accuracy report to this file",
     )
+    parser.add_argument(
+        "--system_prompt", default=None,
+        help="Override system prompt. Pass empty string '' for no system prompt. "
+             "Default: math expert prompt.",
+    )
     args = parser.parse_args()
 
     evaluate(
@@ -743,6 +756,7 @@ def main():
         verbose=args.verbose,
         output=args.output,
         report_path=args.report,
+        system_prompt=args.system_prompt,
     )
 
 
