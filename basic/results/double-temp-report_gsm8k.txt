@@ -1,0 +1,15 @@
+
+============================================================
+GSM8K Evaluation Results
+============================================================
+Model: models/qwen-double_temp
+Samples: 1319
+
+--- Sample-level ---
+  Correct:                526   (39.9%)
+  Empty final_answer:     4   (0.3%)
+  Non-numeric:            11    (0.8%)
+  Valid (non-empty):      1304   (98.9%)
+
+Accuracy (correct / total):         39.88%
+Accuracy (correct / valid):         40.34%
