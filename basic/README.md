@@ -1,5 +1,34 @@
 # Basic — Knowledge Distillation for Math Reasoning
 
+## 目录
+
+- [工作概述](#工作概述)
+- [第一步：数据集加载](#第一步数据集加载已完成)
+- [第二步：Teacher 生成 CoT](#第二步teacher-生成-cot)
+  - [2.1 vLLM 批量生成](#21-vllm-批量生成)
+  - [2.2 自适应采样生成](#22-自适应采样生成)
+- [第三步：答案过滤](#第三步答案过滤)
+  - [3.1 标准过滤（filter.py）](#31-标准过滤filterpy)
+  - [3.2 自适应采样过滤（filter_adaptive.py）](#32-自适应采样过滤filter_adaptivepy)
+- [第四步：数据集合并](#第四步数据集合并已完成)
+- [第五步：Student SFT 微调](#第五步student-sft-微调)
+  - [5.1 Instruct 版本](#51-instruct-版本-finetune_studentpy)
+  - [5.2 自适应采样的语义重复问题](#52-自适应采样的语义重复问题)
+  - [5.3 Adaptive 去重](#53-adaptive-去重-deduplicate_adaptivepy)
+  - [5.4 Base 模型微调](#54-base-模型微调-finetune_student_basepy)
+  - [5.5 完整训练数据集汇总](#55-完整训练数据集汇总)
+- [第六步：测试评估](#第六步测试评估)
+  - [6.0 评估工具](#60-评估工具)
+  - [6.1 Baseline 评估](#61-baseline-评估)
+  - [6.2 Instruct 模型评估](#62-instruct-模型评估)
+  - [6.3 Base 模型评估](#63-base-模型评估)
+  - [6.4 完整汇总](#64-完整汇总)
+- [关键发现](#关键发现)
+  - [蒸馏税](#蒸馏税-distillation-tax)
+- [后续工作](#后续工作-future-work)
+
+---
+
 ## 工作概述
 
 本目录实现一个知识蒸馏（Knowledge Distillation）流水线，目标是让一个较小的 **student model** 通过模仿大模型 **teacher model** 的推理过程，在数学推理任务上获得接近大模型的性能。
@@ -15,8 +44,8 @@
 | 4 — Student Fine-tune (Instruct) | 用合并后的 CoT 数据 SFT Qwen2.5-0.5B-Instruct | ✅ 已完成 |
 | 5 — 测试评估 (Instruct) | 在测试集上评估 Instruct student model，与 baseline 对比 | ✅ 已完成 |
 | 6 — Adaptive 去重 | 对 adaptive 多采样数据做语义去重 | ✅ 已完成 |
-| 7 — Student Fine-tune (Base) | 用去重后数据 SFT Qwen2.5-0.5B **base** 模型 | 🔄 进行中 |
-| 8 — 测试评估 (Base) | 评估 base student model 准确率 | ⏳ 待完成 |
+| 7 — Student Fine-tune (Base) | 用去重后数据 SFT Qwen2.5-0.5B **base** 模型 | ✅ 已完成 |
+| 8 — 测试评估 (Base) | 评估 base student model 准确率 | ✅ 已完成 |
 
 ---
 
@@ -1155,11 +1184,162 @@ basic/
 
 ---
 
-## 第六步：测试评估（Instruct ✅ / Base ⏳）
+### 5.2 自适应采样的语义重复问题
 
-用测试集评估微调后的 student model，统计准确率。`evaluate.py` 复用 `filter.py` 的答案提取和比对逻辑，确保评估方式与训练数据过滤阶段一致。
+对 adaptive 策略的 3 个 T=0.3 样本做语义相似度分析（Sentence-BERT `all-MiniLM-L6-v2`，
+GSM8K 5,557 个有 3 个正确样本的问题）：
 
-### 实现思路
+| 指标 | 数值 |
+|------|------|
+| 平均成对余弦相似度 | **0.936**（超过 0.92 去重阈值） |
+| 相似度 ≥ 0.92 的样本对 | **70.7%** |
+| 3 个样本全部互相 ≥ 0.92 的问题 | **52.6%** |
+| 名义数据量 | 34,024（2.92×） |
+| 实际去重后 | **17,231**（保留率 50.6%，低于估计的 ~63%） |
+
+**不做的危害**：52.6% 的问题 3 个样本坍缩为 1 个 → 梯度失衡（简单题权重 3×）、
+batch 多样性下降、低温模板过拟合。实际保留率比预期更低（50.6% vs ~63%），说明
+T=0.3 低温下的同质化比建模估计更为严重。
+
+为此开发了 `deduplicate_adaptive.py` 对 adaptive 数据做语义去重（详见
+[Adaptive 去重](#adaptive-去重)），将 34,024 条压缩为 17,231 条用于后续 Base 模型训练。
+
+---
+
+### 5.3 Adaptive 去重 (`deduplicate_adaptive.py`)
+
+对 adaptive 采样数据做语义去重——将同一 problem 的多个近重复样本合并，消除
+T=0.3 低温下 52.6% 问题的语义重复（见 [5.2](#52-自适应采样的语义重复问题)）。
+
+#### 去重逻辑
+
+```
+对每个 problem:
+  kept = [sample_0]                    # 始终保留第一个
+  for s in samples[1:]:
+    if max(cosine_sim(s, k) for k in kept) <= 0.92:
+      kept.append(s)                   # 与已有样本都不同 → 保留
+    else:
+      discard(s)                       # 与某个已有样本太像 → 丢弃
+```
+
+#### 使用方法
+
+```bash
+python deduplicate_adaptive.py
+# 输出: data/train_dataset_adaptive_dedup.jsonl (17,231 条，保留率 50.6%)
+
+# 自定义阈值
+python deduplicate_adaptive.py --threshold 0.90
+```
+
+#### 结果
+
+| 指标 | 数值 |
+|------|------|
+| 原始 adaptive correct | 34,024（GSM8K 18,916 + MATH 15,108） |
+| 去重后 | **17,231**（GSM8K 8,907 + MATH 8,324） |
+| 保留率 | **50.6%** |
+| 唯一 problem | 13,026 |
+| 平均样本/problem | 1.32 |
+| 输出文件 | `data/train_dataset_adaptive_dedup.jsonl` |
+
+> 保留率 50.6% 低于预期（~63%），说明 T=0.3 低温下比估计的更为同质化。
+
+---
+
+### 5.4 Base 模型微调 (`finetune_student_base.py`)
+
+基于 Instruct 路线的两个发现——（1）[蒸馏税](#蒸馏税-distillation-tax)
+（2）[自适应采样的语义重复](#52-自适应采样的语义重复问题)——
+转向使用 **Qwen2.5-0.5B base** 模型，在去重后的 adaptive 数据集上微调。
+Base 模型没有预存的数学推理能力（GSM8K ~13.8%），
+所有提升都是蒸馏收益而非从干扰中恢复，叙事干净。
+
+#### 与 Instruct 版本的区别
+
+| 特性 | Instruct 版本 (`finetune_student.py`) | Base 版本 (`finetune_student_base.py`) |
+|------|--------------------------------------|----------------------------------------|
+| 模型 | `Qwen/Qwen2.5-0.5B-Instruct` | `Qwen/Qwen2.5-0.5B` |
+| 初始数学能力 | GSM8K ~41% | 接近 0% |
+| 蒸馏效果 | 被干扰效应污染 | 纯净——所有提升都是蒸馏收益 |
+| 格式 | Chat template `<\|im_start\|>` | 同样使用 chat template（Qwen2.5 base 原生支持） |
+| 论文叙事 | 需要解释蒸馏税 | 叙事干净 |
+
+#### 使用方法
+
+```bash
+# 全量微调（使用去重后的 adaptive 数据）
+python finetune_student_base.py --data data/train_dataset_adaptive_dedup.jsonl \
+                                --output models/qwen-base-adaptive_dedup
+
+# LoRA 微调
+python finetune_student_base.py --lora
+
+# 不用 system prompt（某些 base 模型表现更好）
+python finetune_student_base.py --no_system_prompt
+
+# 断点续训
+python finetune_student_base.py --resume
+```
+
+#### ⚠️ 已知问题：Base 模型生成不停（EOS Token 不匹配）
+
+**现象**：微调后的 base 模型评估时每个样本耗时 ~99s（正常应 ~5s），且生成固定 4096 个 token 才停止。
+
+**根因**：Qwen2.5 base 模型的 `eos_token_id` 是 `<|endoftext|>`（id=151643），而 chat template
+以 `<|im_end|>`（id=151645）标记对话轮次结束。微调时模型学会了在回答末尾
+输出 `<|im_end|>`，但 `model.generate()` 不把它当作停止信号——因为两者是
+不同的 token。
+
+实际行为：模型正确输出 `\boxed{4}<|im_end|>` 后停不下来，继续幻觉出
+`<|im_end|>assistant\n` 然后循环生成下一轮"回答"，直到 `max_new_tokens` 耗尽。
+
+| | Instruct 模型 | Base 模型 |
+|---|---|---|
+| `eos_token` | `<\|im_end\|>` (151645) ✅ | `<\|endoftext\|>` (151643) ❌ |
+| Chat 结束标记 | `<\|im_end\|>` — 与 eos 一致 | `<\|im_end\|>` — 与 eos **不一致** |
+| 生成行为 | 正常停止（~95 tokens） | 永动机（4096 tokens 满额） |
+
+**修复**（已在以下文件中应用）：
+
+1. **`evaluate.py`** — `generate_answer()` 中显式传入 `eos_token_id=[<|endoftext|>, <|im_end|>]`
+2. **`generate_CoT.py`** — 同样的双 EOS token 列表
+3. **`finetune_student_base.py`** — 训练保存后自动更新 `generation_config.json`，将
+   `<|im_end|>` 加入 `eos_token_id`，后续加载模型直接生效
+
+> **注意**：如果你有之前训练好的 base 模型（如 `models/qwen-base-adaptive`），
+> 需要手动编辑其 `generation_config.json`，将 `"eos_token_id"` 从 `[151643]`
+> 改为 `[151643, 151645]`，或者重新训练（新版 `finetune_student_base.py` 会自动处理）。
+
+---
+
+### 5.5 完整训练数据集汇总
+
+| 策略 | 文件 | 原始正确样本 | 最终训练样本 | 说明 |
+|------|------|------------|-------------|------|
+| Single-temp | `train_cot_correct_merged.jsonl` | 11,639 | 11,639 | 无去重，用于 `qwen-single_temp` |
+| Double-temp + dedup | `*_train_cot_dedup_correct.jsonl` | 16,261 | 16,261 | 双温度 pairwise 去重，用于 `qwen-double_temp` |
+| Adaptive (raw) | `*_train_cot_adaptive_correct.jsonl` | 34,024 | 34,024 | 无去重，52.6% 重复，用于 `qwen-adaptive` |
+| **Adaptive (dedup)** | **`train_dataset_adaptive_dedup.jsonl`** | 34,024 | **17,231** | 语义去重，用于 `qwen-base-adaptive` |
+
+---
+
+## 第六步：测试评估
+
+用测试集评估微调后的 student model，统计准确率。`evaluate.py` 复用 `filter.py`
+的答案提取和比对逻辑，确保评估方式与训练数据过滤阶段一致。
+
+评估分为三个阶段逐步推进：
+1. 首先建立 **Baseline**（未微调模型的原始能力）
+2. 然后评估 **Instruct 模型**的蒸馏效果，发现"蒸馏税"问题
+3. 最后转向 **Base 模型**，验证纯净蒸馏收益
+
+---
+
+### 6.0 评估工具
+
+#### 实现思路
 
 | 组件 | 说明 |
 |------|------|
@@ -1170,7 +1350,7 @@ basic/
 | 答案比对 | GSM8K：数值比对（容差 `1e-9`）；MATH：字符串比对（空白符归一化） |
 | 分类统计 | MATH 按 `type`（Algebra、Geometry 等）和 `level`（Level 1-5）分类报告 |
 
-### 使用方法
+#### 使用方法
 
 ```bash
 # 评估已微调模型（GSM8K）
@@ -1181,9 +1361,6 @@ python evaluate.py --model models/qwen-double_temp --dataset math --max_new_toke
 
 # 两个数据集一起评估
 python evaluate.py --model models/qwen-adaptive --dataset both
-
-# 评估未微调的 baseline（直接拉 HuggingFace）
-python evaluate.py --model Qwen/Qwen2.5-0.5B-Instruct --dataset gsm8k
 
 # 快速测试 20 条
 python evaluate.py --model models/qwen-adaptive --dataset gsm8k --max_samples 20
@@ -1197,7 +1374,7 @@ python evaluate.py --model models/qwen-adaptive --dataset both \
     -r results/report.txt
 ```
 
-### 命令行参数
+#### 命令行参数
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
@@ -1209,10 +1386,11 @@ python evaluate.py --model models/qwen-adaptive --dataset both \
 | `--top_p` | `0.95` | Nucleus sampling top-p |
 | `--clean_tags` | `False` | 剥离 `<think>...</think>` 标签（用于 DeepSeek-R1 teacher model） |
 | `--verbose` / `-v` | `False` | 逐条打印预测 vs ground-truth |
-| `--output` / `-o` | — | 预测结果写入 JSONL 文件（含 `problem`、`generated`、`final_answer`、`ground_truth`、`is_correct`） |
+| `--output` / `-o` | — | 预测结果写入 JSONL |
 | `--report` / `-r` | — | 统计报告写入文本文件 |
+| `--system_prompt` | — | 覆盖默认 system prompt（Base 模型评估时需与训练一致） |
 
-### 输出
+#### 输出格式
 
 **终端输出** — 每次运行都会打印完整报告：
 
@@ -1231,56 +1409,7 @@ Samples: 1319
 
 Accuracy (correct / total):         41.55%
 Accuracy (correct / valid):         42.02%
-
---- By Type ---       (MATH only)
---- By Level ---      (MATH only)
 ```
-
-### 实际评估结果
-
-以下为三个微调策略和 baseline 在 GSM8K 和 MATH 测试集上的完整评估结果。
-
-#### GSM8K 测试集（1,319 样本）
-
-| 模型 | 正确数 | 总准确率 | 有效准确率 | 空答案 |
-|------|--------|----------|-----------|--------|
-| **Baseline (未微调, Qwen2.5-0.5B-Instruct)** | 540 | **40.94%** | 41.80% | 13 |
-| Single-temp (微调后) | 513 | 38.89% | 39.28% | 2 |
-| Double-temp (微调后) | 526 | 39.88% | 40.34% | 4 |
-| Adaptive (微调后) | 548 | **41.55%** | 42.02% | 5 |
-
-> ⚠️ **关键发现 — 蒸馏税 (Distillation Tax)**：未微调的 baseline（40.94%）高于 single-temp（38.89%）和 double-temp（39.88%）。Qwen2.5-0.5B-Instruct 本身已具备 GSM8K 推理能力，微调引入了 DeepSeek-R1 风格的 CoT 分布偏移，造成干扰。只有 adaptive（41.55%）勉强超过 baseline（+0.61pp）。详见 [蒸馏税分析](#关键发现)。
-
-#### MATH 测试集（1,250 样本）
-
-| 模型 | 正确数 | 总准确率 | 有效准确率 | 空答案 |
-|------|--------|----------|-----------|--------|
-| Baseline (未微调) | — | — | — | 待评估 |
-| Single-temp (微调后) | 247 | 19.76% | 20.05% | 18 |
-| Double-temp (微调后) | 253 | **20.24%** | 20.37% | 8 |
-| Adaptive (微调后) | 238 | 19.04% | 19.19% | 10 |
-
-#### MATH 按科目（微调后模型）
-
-| 科目 | Single | Double | Adaptive |
-|------|--------|--------|----------|
-| Algebra | 34.9% | **38.0%** | 33.1% |
-| Counting & Probability | 11.3% | 14.3% | **16.5%** |
-| Geometry | 8.3% | **9.9%** | 8.3% |
-| Intermediate Algebra | 8.1% | **8.5%** | 8.5% |
-| Number Theory | **21.6%** | 17.0% | 13.1% |
-| Prealgebra | **34.4%** | 32.8% | 33.9% |
-| Precalculus | 5.4% | 5.4% | **7.0%** |
-
-#### MATH 按难度
-
-| 难度 | Single | Double | Adaptive |
-|------|--------|--------|----------|
-| Level 1 | 44.8% | 48.3% | **50.6%** |
-| Level 2 | 35.8% | **37.3%** | 31.9% |
-| Level 3 | 23.1% | **24.8%** | 21.4% |
-| Level 4 | **14.3%** | 13.0% | 13.3% |
-| Level 5 | 6.6% | 6.3% | **7.1%** |
 
 **`--output` JSONL** — 每行一条，含完整生成结果和比对标记：
 
@@ -1296,71 +1425,18 @@ Accuracy (correct / valid):         42.02%
 }
 ```
 
-### 本地已训练模型
-
-| 模型 | 路径 | 训练数据 | 说明 |
-|------|------|----------|------|
-| qwen-adaptive | `models/qwen-adaptive` | 自适应采样正确样本 | Qwen2.5-0.5B，3 epochs |
-| qwen-double_temp | `models/qwen-double_temp` | 双温度去重后正确样本 | Qwen2.5-0.5B，3 epochs |
-| qwen-single_temp | `models/qwen-single_temp` | 单温度（T=0.6）正确样本 | Qwen2.5-0.5B，3 epochs |
-
-### 相关文件
-
-```
-basic/
-├── data/
-│   ├── gsm8k_test.jsonl                       # 输入：GSM8K 测试集（1,319 条）
-│   └── math_test.jsonl                        # 输入：MATH 测试集（1,250 条）
-├── models/
-│   ├── qwen-adaptive/                          # 输入：自适应采样训练模型
-│   ├── qwen-double_temp/                       # 输入：双温度训练模型
-│   └── qwen-single_temp/                       # 输入：单温度训练模型
-├── evaluate.py                                 # 评估脚本
-├── filter.py                                   # 被复用的答案提取和比对逻辑
-└── README.md
-```
-
 ---
 
-## 关键发现
+### 6.1 Baseline 评估
 
-### 蒸馏税 (Distillation Tax)
-
-**Qwen2.5-0.5B-Instruct 未微调时的 GSM8K 准确率（40.94%）高于两个微调后的模型。** 这揭示了知识蒸馏中的一个根本性问题：
-
-| 机制 | 说明 |
-|------|------|
-| **推理风格冲突** | Qwen2.5-Instruct 的简洁直接风格 vs DeepSeek-R1 的冗长 CoT 风格。强迫 student 采用陌生风格导致干扰 |
-| **低数据量下的灾难性干扰** | 11,639 样本（single-temp）只够部分覆盖原生能力，不足以完全学会新风格 → 最差中间态（-2.05pp） |
-| **通过数据规模恢复** | Double-temp（16,261）缩小差距到 -1.06pp，adaptive（34,024）勉强 +0.61pp。3× 数据换来的大多是收复失地，而非真实提升 |
-
-**结论**：对于 student 已有能力的任务，蒸馏可能适得其反。对 harder tasks（MATH）可能不同——MATH baseline 待评估。
-
-### 自适应采样的语义重复问题
-
-对 adaptive 策略的 3 个 T=0.3 样本做语义相似度分析（Sentence-BERT `all-MiniLM-L6-v2`，GSM8K 5,557 个有 3 个正确样本的问题）：
-
-| 指标 | 数值 |
-|------|------|
-| 平均成对余弦相似度 | **0.936**（超过 0.92 去重阈值） |
-| 相似度 ≥ 0.92 的样本对 | **70.7%** |
-| 3 个样本全部互相 ≥ 0.92 的问题 | **52.6%** |
-| 名义数据量 | 34,024（2.92×） |
-| 实际去重后 | **17,231**（保留率 50.6%，低于估计的 ~63%） |
-
-**不做的危害**：52.6% 的问题 3 个样本坍缩为 1 个 → 梯度失衡（简单题权重 3×）、batch 多样性下降、低温模板过拟合。实际保留率比预期更低（50.6% vs ~63%），说明 T=0.3 低温下的同质化比建模估计更为严重。
-
----
-
-## Baseline 评估
-
-`evaluate_baseline.py` 用于评估未微调模型的 baseline 准确率。
+首先对未微调的原始模型进行 baseline 评估，建立比较基准。
+`evaluate_baseline.py` 封装了 `evaluate.py` 的调用，使用与训练一致的 prompt 格式。
 
 ```bash
-# Base 模型 baseline（推荐）
+# Base 模型 baseline（默认 Qwen/Qwen2.5-0.5B）
 python evaluate_baseline.py --dataset both
 
-# Instruct 模型 baseline（与现有微调结果对比）
+# Instruct 模型 baseline（与微调结果对比）
 python evaluate_baseline.py --model Qwen/Qwen2.5-0.5B-Instruct --dataset both
 
 # 快速测试
@@ -1374,110 +1450,249 @@ python evaluate_baseline.py --max_samples 50
 | `--system_prompt` | 最小化 step-by-step prompt | 自定义 system prompt |
 | `--no_system_prompt` | False | 不使用 system prompt |
 
----
+#### Baseline 结果
 
-## Base 模型微调
+| 模型 (未微调) | GSM8K 准确率 | MATH 准确率 | 说明 |
+|---------------|-------------|------------|------|
+| **Instruct Baseline** (`Qwen2.5-0.5B-Instruct`) | **40.94%** | 待评估 | 已具备 GSM8K 推理能力 |
+| **Base Baseline** (`Qwen2.5-0.5B`) | **13.80%** | 待评估 | 接近随机，空答案率 58%，无推理能力 |
 
-`finetune_student_base.py` 用于微调 **Qwen2.5-0.5B base**（非 Instruct）。与 Instruct 版本不同，base 模型没有预存的数学推理能力，蒸馏收益是真实的而非从干扰中恢复。
+> Base Baseline 的 GSM8K 13.80% 中大部分是简单猜测命中，58% 的题目甚至无法生成有效数值答案。
+> Instruct Baseline 的 40.94% 说明 Qwen2.5-Instruct 在指令微调阶段已获得可观的数学推理能力。
 
-### 与 Instruct 版本的区别
+**Baseline 结果文件：**
 
-| 特性 | Instruct 版本 (`finetune_student.py`) | Base 版本 (`finetune_student_base.py`) |
-|------|--------------------------------------|----------------------------------------|
-| 模型 | `Qwen/Qwen2.5-0.5B-Instruct` | `Qwen/Qwen2.5-0.5B` |
-| 初始数学能力 | GSM8K ~41% | 接近 0% |
-| 蒸馏效果 | 被干扰效应污染 | 纯净——所有提升都是蒸馏收益 |
-| 格式 | Chat template `<\|im_start\|>` | 同样使用 chat template（Qwen2.5 base 原生支持） |
-| 论文叙事 | 需要解释蒸馏税 | 叙事干净 |
-
-### 使用方法
-
-```bash
-# 全量微调
-python finetune_student_base.py --data data/train_cot_correct_merged.jsonl \
-                                --output models/qwen-base-single_temp
-
-# LoRA 微调
-python finetune_student_base.py --lora
-
-# 不用 system prompt（某些 base 模型表现更好）
-python finetune_student_base.py --no_system_prompt
-
-# 断点续训
-python finetune_student_base.py --resume
-```
-
----
-
-## Adaptive 去重
-
-`deduplicate_adaptive.py` 对 adaptive 采样数据做语义去重——将同一 problem 的多个近重复样本合并。
-
-### 去重逻辑
-
-```
-对每个 problem:
-  kept = [sample_0]                    # 始终保留第一个
-  for s in samples[1:]:
-    if max(cosine_sim(s, k) for k in kept) <= 0.92:
-      kept.append(s)                   # 与已有样本都不同 → 保留
-    else:
-      discard(s)                       # 与某个已有样本太像 → 丢弃
-```
-
-### 使用方法
-
-```bash
-python deduplicate_adaptive.py
-# 输出: data/train_dataset_adaptive_dedup.jsonl (17,231 条，保留率 50.6%)
-
-# 自定义阈值
-python deduplicate_adaptive.py --threshold 0.90
-```
-
-### 预期效果 → 实际结果
-
-| 指标 | 数值 |
+| 文件 | 内容 |
 |------|------|
-| 原始 adaptive correct | 34,024（GSM8K 18,916 + MATH 15,108） |
-| 去重后 | **17,231**（GSM8K 8,907 + MATH 8,324） |
-| 保留率 | **50.6%** |
-| 唯一 problem | 13,026 |
-| 平均样本/problem | 1.32 |
-| 输出文件 | `data/train_dataset_adaptive_dedup.jsonl` |
-
-> 保留率 50.6% 低于预期（~63%），说明 T=0.3 低温下比估计的更为同质化。
+| `results/Instruct-baseline-predictions-gsm8k.jsonl` | Instruct Baseline 在 GSM8K 上的逐题预测 |
+| `results/Instruct-baseline-report-gsm8k.txt` | Instruct Baseline GSM8K 准确率报告 |
+| `results/base-baseline-predictions-gsm8k.jsonl` | Base Baseline 在 GSM8K 上的逐题预测 |
+| `results/base-baseline-report-gsm8k.txt` | Base Baseline GSM8K 准确率报告 |
 
 ---
 
-## 完整训练数据集汇总
+### 6.2 Instruct 模型评估
 
-| 策略 | 文件 | 原始正确样本 | 最终训练样本 | 说明 |
-|------|------|------------|-------------|------|
-| Single-temp | `train_cot_correct_merged.jsonl` | 11,639 | 11,639 | 无去重 |
-| Double-temp + dedup | `*_train_cot_dedup_correct.jsonl` | 16,261 | 16,261 | 双温度 pairwise 去重 |
-| Adaptive (raw, 无去重) | `*_train_cot_adaptive_correct.jsonl` | 34,024 | 34,024 | 3 samples/problem，52.6% 问题全重复 |
-| **Adaptive (dedup)** | **`train_dataset_adaptive_dedup.jsonl`** | 34,024 | **17,231** | 语义去重，保留率 50.6% |
+用三种 CoT 生成策略（single_temp / double_temp / adaptive）对应的训练数据，
+分别微调 Qwen2.5-0.5B-**Instruct**，对比蒸馏效果。
 
-> **当前训练方案**：使用 `train_dataset_adaptive_dedup.jsonl`（17,231 条）微调 Qwen2.5-0.5B base 模型，输出到 `models/qwen-base-adaptive_dedup`。
+#### 模型对照
+
+| 模型名 | 训练数据策略 | 训练样本数 | 说明 |
+|--------|-------------|------------|------|
+| `qwen-single_temp` | single_temp — 单温度 T=0.6 | 11,639 | 基线蒸馏策略 |
+| `qwen-double_temp` | double_temp — 双温度 (T=0.6 + T=0.9) 去重 | 16,261 | 增加高温多样性 |
+| `qwen-adaptive` | adaptive — 自适应采样 (T=0.3 × 3)，无去重 | 34,024 | 最大数据量，但 52.6% 问题有语义重复 |
+
+#### GSM8K 测试集（1,319 样本）
+
+| 模型 | 正确数 | 总准确率 | 有效准确率 | 空答案 | vs Baseline |
+|------|--------|----------|-----------|--------|-------------|
+| Instruct Baseline | 540 | **40.94%** | 41.80% | 13 | — |
+| `qwen-single_temp` | 513 | 38.89% | 39.28% | 2 | **-2.05pp** ❌ |
+| `qwen-double_temp` | 526 | 39.88% | 40.34% | 4 | **-1.06pp** ❌ |
+| `qwen-adaptive` | 548 | **41.55%** | 42.02% | 5 | **+0.61pp** ✅ |
+
+#### MATH 测试集（1,250 样本）
+
+| 模型 | 正确数 | 总准确率 | 有效准确率 | 空答案 |
+|------|--------|----------|-----------|--------|
+| `qwen-single_temp` | 247 | 19.76% | 20.05% | 18 |
+| `qwen-double_temp` | 253 | **20.24%** | 20.37% | 8 |
+| `qwen-adaptive` | 238 | 19.04% | 19.19% | 10 |
+
+#### MATH 按科目
+
+| 科目 | `qwen-single_temp` | `qwen-double_temp` | `qwen-adaptive` |
+|------|---------------------|---------------------|------------------|
+| Algebra | 34.9% | **38.0%** | 33.1% |
+| Counting & Probability | 11.3% | 14.3% | **16.5%** |
+| Geometry | 8.3% | **9.9%** | 8.3% |
+| Intermediate Algebra | 8.1% | **8.5%** | 8.5% |
+| Number Theory | **21.6%** | 17.0% | 13.1% |
+| Prealgebra | **34.4%** | 32.8% | 33.9% |
+| Precalculus | 5.4% | 5.4% | **7.0%** |
+
+#### MATH 按难度
+
+| 难度 | `qwen-single_temp` | `qwen-double_temp` | `qwen-adaptive` |
+|------|---------------------|---------------------|------------------|
+| Level 1 | 44.8% | 48.3% | **50.6%** |
+| Level 2 | 35.8% | **37.3%** | 31.9% |
+| Level 3 | 23.1% | **24.8%** | 21.4% |
+| Level 4 | **14.3%** | 13.0% | 13.3% |
+| Level 5 | 6.6% | 6.3% | **7.1%** |
+
+#### ⚠️ Instruct 路线的核心问题：蒸馏税
+
+1. **两个模型（single_temp、double_temp）微调后反而不如未微调**：Instruct Baseline GSM8K 40.94%，
+   微调后反而降到 38.89% 和 39.88%。Qwen2.5-Instruct 原生的简洁推理风格被 DeepSeek-R1
+   的冗长 CoT 风格干扰。
+
+2. **数据堆砌效率极低**：从 11,639 → 34,024 样本（3×），准确率仅从 38.89% → 41.55%（+2.66pp），
+   其中大部分是收复失地而非真实提升。`qwen-adaptive` 的 34,024 样本中有 52.6% 的问题是语义重复的。
+
+3. **MATH 上没有本质突破**：三种策略在 MATH 上的准确率都在 19-20% 徘徊，数据量的增加没有带来
+   显著提升。详见 [蒸馏税分析](#关键发现)。
+
+#### Instruct 评估结果文件
+
+| 文件 | 对应模型 | 数据集 | 内容 |
+|------|----------|--------|------|
+| `single-temp-predictions_gsm8k.jsonl` | `qwen-single_temp` | GSM8K | 逐题预测详情 |
+| `single-temp-report_gsm8k.txt` | 同上 | GSM8K | 准确率报告 |
+| `single-temp-predictions_math.jsonl` | `qwen-single_temp` | MATH | 逐题预测详情 |
+| `single-temp-report_math.txt` | 同上 | MATH | 准确率报告 |
+| `double-temp-predictions_gsm8k.jsonl` | `qwen-double_temp` | GSM8K | 逐题预测详情 |
+| `double-temp-report_gsm8k.txt` | 同上 | GSM8K | 准确率报告 |
+| `double-temp-predictions_math.jsonl` | `qwen-double_temp` | MATH | 逐题预测详情 |
+| `double-temp-report_math.txt` | 同上 | MATH | 准确率报告 |
+| `adaptive-predictions_gsm8k.jsonl` | `qwen-adaptive` | GSM8K | 逐题预测详情 |
+| `adaptive-report_gsm8k.txt` | 同上 | GSM8K | 准确率报告 |
+| `adaptive-predictions_math.jsonl` | `qwen-adaptive` | MATH | 逐题预测详情 |
+| `adaptive-report_math.txt` | 同上 | MATH | 准确率报告 |
 
 ---
 
-## 当前工作
+### 6.3 Base 模型评估
 
-```bash
-# Step 1: Baseline（先跑 MATH baseline）
-python evaluate_baseline.py --dataset math
+#### 为什么转向 Base 模型
 
-# Step 2: 训练 base 模型
-python finetune_student_base.py \
-    --data data/train_dataset_adaptive_dedup.jsonl \
-    --output models/qwen-base-adaptive_dedup
+Instruct 路线的"蒸馏税"揭示了根本问题：当 student 已有任务能力时，强迫它模仿
+teacher 的推理风格会造成干扰。Base 模型（Qwen2.5-0.5B）GSM8K 准确率仅 13.80%，
+没有预存推理能力，所有提升都是纯净的蒸馏收益，叙事干净。
 
-# Step 3: 评估
-python evaluate.py --model models/qwen-base-adaptive_dedup --dataset both \
-    --system_prompt "Solve the problem step by step. Show your reasoning clearly. Put your final answer in \boxed{}."
+此外，Instruct 路线中发现的 adaptive 语义重复问题（52.6% 的问题 3 个 sample 近似相同）
+也通过 `deduplicate_adaptive.py` 在 Base 路线的训练数据中修复。
+
+#### 模型对照
+
+| 模型名 | 基座 | 训练数据 | 训练样本数 | 说明 |
+|--------|------|----------|------------|------|
+| `qwen-base-adaptive` | Qwen2.5-0.5B **Base** | adaptive 去重后正确样本 | 17,231 | 对比 Instruct 路线 |
+| `qwen-base-adaptive_dedup` | Qwen2.5-0.5B **Base** | adaptive 去重后正确样本 | 17,231 | 同上（去重新版） |
+
+> 两个模型训练数据相同（17,231 条），`qwen-base-adaptive` 的 generation_config 已
+> 修复 EOS token 问题（见 [Base 模型微调 - 已知问题](#-已知问题base-模型生成不停eos-token-不匹配)）。
+
+#### Base Baseline vs Base Fine-tuned（GSM8K）
+
+| 模型 | 正确数 | 总准确率 | 有效准确率 | 空答案 |
+|------|--------|----------|-----------|--------|
+| Base Baseline (未微调) | 182 | 13.80% | 33.27% | 765 (58.0%) |
+| `qwen-base-adaptive` | 564 | **42.76%** | 43.62% | 16 (1.2%) |
+
+> **提升幅度**：+28.96pp（13.80% → 42.76%），这是纯净的蒸馏收益。
+> 空答案从 58.0% 降到 1.2%，说明模型学会了 chat template 格式和 `\boxed{}` 输出规范。
+> **已超过所有 Instruct 模型**（Instruct Baseline 40.94%，`qwen-adaptive` 41.55%），
+> 且训练数据仅 17,231 条，比 `qwen-adaptive` 的 34,024 条少了一半。
+
+#### Base 评估结果文件
+
+| 文件 | 对应模型 | 数据集 | 内容 |
+|------|----------|--------|------|
+| `base-baseline-predictions-gsm8k.jsonl` | Base Baseline (未微调) | GSM8K | 逐题预测详情 |
+| `base-baseline-report-gsm8k.txt` | 同上 | GSM8K | 准确率报告 |
+| `base-adaptive-predictions_gsm8k.jsonl` | `qwen-base-adaptive` | GSM8K | 逐题预测详情 |
+| `base-adaptive-report_gsm8k.txt` | 同上 | GSM8K | 准确率报告 |
+
+---
+
+### 6.4 完整汇总
+
+#### 所有模型一览
+
+| 模型名 | 基座 | 训练数据 | 训练样本 | GSM8K | MATH |
+|--------|------|----------|----------|-------|------|
+| Baseline (未微调) | Instruct | — | — | 40.94% | 待评估 |
+| `qwen-single_temp` | Instruct | single_temp | 11,639 | 38.89% | 19.76% |
+| `qwen-double_temp` | Instruct | double_temp | 16,261 | 39.88% | **20.24%** |
+| `qwen-adaptive` | Instruct | adaptive (无去重) | 34,024 | 41.55% | 19.04% |
+| Baseline (未微调) | Base | — | — | 13.80% | 待评估 |
+| `qwen-base-adaptive` | Base | adaptive 去重 | 17,231 | **42.76%** | 待评估 |
+
+> **命名规则**：`base-` 前缀 = Base 模型，无前缀 = Instruct 模型。
+> `single_temp` / `double_temp` / `adaptive` 对应第二步的三种 CoT 生成策略。
+
+#### 结果文件完整列表
+
+以 GSM8K 为例说明文件命名规则：
+
+- **`base-` 前缀** → Base 模型，无前缀 → Instruct 模型
+- **`baseline`** → 未微调的原始模型
+- **`-predictions-*.jsonl`** → 逐题预测（`problem`、`generated`、`final_answer`、`ground_truth`、`is_correct`）
+- **`-report-*.txt`** → 准确率统计报告
+- **`_gsm8k`** → GSM8K 测试集（1,319 样本），**`_math`** → MATH 测试集（1,250 样本）
+
+| 文件 | 对应模型 | 基座 | 数据集 | 内容 |
+|------|----------|------|--------|------|
+| `Instruct-baseline-predictions-gsm8k.jsonl` | Baseline (未微调) | Instruct | GSM8K | 逐题预测详情 |
+| `Instruct-baseline-report-gsm8k.txt` | 同上 | Instruct | GSM8K | 准确率报告 |
+| `single-temp-predictions_gsm8k.jsonl` | `qwen-single_temp` | Instruct | GSM8K | 逐题预测详情 |
+| `single-temp-report_gsm8k.txt` | 同上 | Instruct | GSM8K | 准确率报告 |
+| `single-temp-predictions_math.jsonl` | `qwen-single_temp` | Instruct | MATH | 逐题预测详情 |
+| `single-temp-report_math.txt` | 同上 | Instruct | MATH | 准确率报告 |
+| `double-temp-predictions_gsm8k.jsonl` | `qwen-double_temp` | Instruct | GSM8K | 逐题预测详情 |
+| `double-temp-report_gsm8k.txt` | 同上 | Instruct | GSM8K | 准确率报告 |
+| `double-temp-predictions_math.jsonl` | `qwen-double_temp` | Instruct | MATH | 逐题预测详情 |
+| `double-temp-report_math.txt` | 同上 | Instruct | MATH | 准确率报告 |
+| `adaptive-predictions_gsm8k.jsonl` | `qwen-adaptive` | Instruct | GSM8K | 逐题预测详情 |
+| `adaptive-report_gsm8k.txt` | 同上 | Instruct | GSM8K | 准确率报告 |
+| `adaptive-predictions_math.jsonl` | `qwen-adaptive` | Instruct | MATH | 逐题预测详情 |
+| `adaptive-report_math.txt` | 同上 | Instruct | MATH | 准确率报告 |
+| `base-baseline-predictions-gsm8k.jsonl` | Baseline (未微调) | Base | GSM8K | 逐题预测详情 |
+| `base-baseline-report-gsm8k.txt` | 同上 | Base | GSM8K | 准确率报告 |
+| `base-adaptive-predictions_gsm8k.jsonl` | `qwen-base-adaptive` | Base | GSM8K | 逐题预测详情 |
+| `base-adaptive-report_gsm8k.txt` | 同上 | Base | GSM8K | 准确率报告 |
+
+#### 相关文件
+
 ```
+basic/
+├── data/
+│   ├── gsm8k_test.jsonl                       # 输入：GSM8K 测试集（1,319 条）
+│   └── math_test.jsonl                        # 输入：MATH 测试集（1,250 条）
+├── models/
+│   ├── qwen-single_temp/                       # Instruct + single_temp（11,639 样本）
+│   ├── qwen-double_temp/                       # Instruct + double_temp 去重（16,261 样本）
+│   ├── qwen-adaptive/                          # Instruct + adaptive 无去重（34,024 样本）
+│   ├── qwen-base-adaptive/                     # Base + adaptive 去重（17,231 样本）
+│   └── qwen-base-adaptive_dedup/               # Base + adaptive 去重（17,231 样本）
+├── results/
+│   ├── Instruct-baseline-predictions-gsm8k.jsonl   # Instruct 基线预测
+│   ├── Instruct-baseline-report-gsm8k.txt          # Instruct 基线报告
+│   ├── base-baseline-predictions-gsm8k.jsonl       # Base 基线预测
+│   ├── base-baseline-report-gsm8k.txt              # Base 基线报告
+│   ├── single-temp-predictions_{gsm8k,math}.jsonl  # single_temp 预测
+│   ├── single-temp-report_{gsm8k,math}.txt         # single_temp 报告
+│   ├── double-temp-predictions_{gsm8k,math}.jsonl  # double_temp 预测
+│   ├── double-temp-report_{gsm8k,math}.txt         # double_temp 报告
+│   ├── adaptive-predictions_{gsm8k,math}.jsonl     # adaptive 预测
+│   ├── adaptive-report_{gsm8k,math}.txt            # adaptive 报告
+│   ├── base-adaptive-predictions_gsm8k.jsonl       # base-adaptive 预测
+│   └── base-adaptive-report_gsm8k.txt              # base-adaptive 报告
+├── evaluate.py                                 # 评估脚本
+├── evaluate_baseline.py                        # Baseline 评估脚本
+├── filter.py                                   # 被复用的答案提取和比对逻辑
+└── README.md
+```
+
+---
+
+## 关键发现
+
+### 蒸馏税 (Distillation Tax)
+
+**Instruct Baseline 未微调时的 GSM8K 准确率（40.94%）高于 `qwen-single_temp` 和
+`qwen-double_temp` 两个微调后的模型。** 这揭示了知识蒸馏中的一个根本性问题：
+
+| 机制 | 说明 |
+|------|------|
+| **推理风格冲突** | Qwen2.5-Instruct 的简洁直接风格 vs DeepSeek-R1 的冗长 CoT 风格。强迫 student 采用陌生风格导致干扰 |
+| **低数据量下的灾难性干扰** | `qwen-single_temp`（11,639 样本）只够部分覆盖原生能力，不足以完全学会新风格 → 最差中间态（-2.05pp） |
+| **通过数据规模恢复** | `qwen-double_temp`（16,261）缩小差距到 -1.06pp，`qwen-adaptive`（34,024）勉强 +0.61pp。3× 数据换来的大多是收复失地，而非真实提升 |
+
+**结论**：对于 student 已有能力的任务，蒸馏可能适得其反。对 harder tasks（MATH）可能不同——MATH baseline 待评估。
 
 ## 后续工作 (Future Work)
 
@@ -1486,5 +1701,6 @@ python evaluate.py --model models/qwen-base-adaptive_dedup --dataset both \
 | 自适应阈值校准 | 通过 pilot study 分析 log-probability 分布，设定合适的 τ，让 Round 2 高温重采样真正触发 |
 | Token 上限提升 | MATH 26.8% 因 max_tokens=4096 截断，探索 8192 或更高 |
 | 低质量 CoT 过滤 | 过滤自校正模式（"wait"、"Oops"等，~0.7%）和高重复样本（~0.2%） |
-| 迭代蒸馏 | 多轮 student 生成 → 自纠正 → 再训练的循环 |
+| **纠错蒸馏 (Error-Driven Distillation)** | 找出 Student 答错但 Teacher 答对的题目，将 Teacher 的正确 CoT 作为纠错样本追加训练。精准打击薄弱点，避免在已掌握的题目上浪费算力。可迭代多轮：每轮 Student 提升后错误集缩小，下一轮仅针对剩余错误。需防灾难性遗忘（混合原始数据 + 纠错数据一起训） |
+| 迭代蒸馏 | 多轮 Student 自己生成 CoT → 自纠正 → 再训练的循环（纠错蒸馏的更激进版本：不用 Teacher，Student 自产自纠） |
 | 跨领域扩展 | 逻辑推理、代码生成等非数学领域 |
