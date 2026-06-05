@@ -333,6 +333,30 @@ def main():
     print(f"\nSaving model to {args.output} ...")
     trainer.save_model(args.output)
     tokenizer.save_pretrained(args.output)
+
+    # Update generation_config so <|im_end|> acts as an EOS token.
+    # Qwen2.5-base has eos_token_id = <|endoftext|>, but the chat template
+    # ends every turn with <|im_end|>.  Without this, the fine-tuned base
+    # model fills max_new_tokens every time.
+    import json as _json
+    gen_cfg_path = os.path.join(args.output, "generation_config.json")
+    if os.path.exists(gen_cfg_path):
+        with open(gen_cfg_path, encoding="utf-8") as _f:
+            gen_cfg = _json.load(_f)
+        im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
+        existing = gen_cfg.get("eos_token_id")
+        if existing is not None:
+            if isinstance(existing, list):
+                eos_ids = existing
+            else:
+                eos_ids = [existing]
+            if im_end_id is not None and im_end_id not in eos_ids:
+                eos_ids.append(im_end_id)
+                gen_cfg["eos_token_id"] = eos_ids
+                with open(gen_cfg_path, "w", encoding="utf-8") as _f:
+                    _json.dump(gen_cfg, _f, indent=2, ensure_ascii=False)
+                print(f"  Updated generation_config.json: eos_token_id = {eos_ids}")
+
     print("Done.")
 
 
