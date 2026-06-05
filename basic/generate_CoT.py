@@ -67,6 +67,13 @@ def generate(
     inputs = tokenizer(text, return_tensors="pt").to(model.device)
     input_len = inputs.input_ids.shape[1]
 
+    # Include <|im_end|> as an EOS token so that base models fine-tuned with
+    # the chat template stop generating at the end of each turn.
+    eos_token_ids = [tokenizer.eos_token_id]
+    im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
+    if im_end_id is not None and im_end_id != tokenizer.eos_token_id:
+        eos_token_ids.append(im_end_id)
+
     with torch.no_grad():
         outputs = model.generate(
             **inputs,
@@ -75,6 +82,7 @@ def generate(
             do_sample=True,
             top_p=0.95,
             pad_token_id=tokenizer.eos_token_id,
+            eos_token_id=eos_token_ids,
         )
 
     generated_ids = outputs[0][input_len:]
