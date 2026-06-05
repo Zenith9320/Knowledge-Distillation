@@ -411,6 +411,16 @@ def generate_answer(
     inputs = tokenizer(text, return_tensors="pt").to(model.device)
     input_len = inputs.input_ids.shape[1]
 
+    # Build EOS token IDs: include both the tokenizer's native eos_token
+    # (e.g. <|endoftext|> for Qwen2.5-base, <|im_end|> for Instruct) AND
+    # <|im_end|> explicitly.  Base models fine-tuned with the chat template
+    # generate <|im_end|> to end turns, but their config eos_token_id may
+    # still point to <|endoftext|>, causing generation to run until max_new_tokens.
+    eos_token_ids = [tokenizer.eos_token_id]
+    im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
+    if im_end_id is not None and im_end_id != tokenizer.eos_token_id:
+        eos_token_ids.append(im_end_id)
+
     with torch.no_grad():
         outputs = model.generate(
             **inputs,
@@ -419,6 +429,7 @@ def generate_answer(
             do_sample=True,
             top_p=top_p,
             pad_token_id=tokenizer.eos_token_id,
+            eos_token_id=eos_token_ids,
         )
 
     generated_ids = outputs[0][input_len:]
