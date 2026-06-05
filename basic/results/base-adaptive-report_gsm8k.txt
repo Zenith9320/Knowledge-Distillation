@@ -1,0 +1,15 @@
+
+============================================================
+GSM8K Evaluation Results
+============================================================
+Model: models/qwen-base-adaptive
+Samples: 1319
+
+--- Sample-level ---
+  Correct:                564   (42.8%)
+  Empty final_answer:     16   (1.2%)
+  Non-numeric:            10    (0.8%)
+  Valid (non-empty):      1293   (98.0%)
+
+Accuracy (correct / total):         42.76%
+Accuracy (correct / valid):         43.62%
