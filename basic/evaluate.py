@@ -32,7 +32,7 @@ import re
 import sys
 import torch
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, StoppingCriteria, StoppingCriteriaList
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -343,6 +343,99 @@ def clean_deepseek_tags(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Repetition detection (early stopping)
+# ---------------------------------------------------------------------------
+
+class RepetitionStoppingCriteria(StoppingCriteria):
+    """Stop generation when the same text pattern repeats excessively.
+
+    Detects when a substring of at least ``min_pattern_len`` characters
+    repeats consecutively ``max_repeats`` or more times at the end of the
+    generated text.  This prevents the model from looping on tokens like
+    ``\\nmoire\\nmoire\\nmoire...`` and wasting compute.
+
+    Uses an efficient sliding-window check that only examines the tail of
+    the generated text, avoiding the catastrophic backtracking of a
+    backreference regex on long sequences.  Also throttles to check only
+    every ``check_every`` tokens to reduce per-step overhead.
+
+    Parameters
+    ----------
+    tokenizer:
+        The tokenizer, used to decode generated token IDs to text.
+    min_pattern_len:
+        Minimum length (in characters) of a repeating pattern to detect.
+    max_repeats:
+        Stop when the same pattern appears this many times consecutively.
+    input_len:
+        Number of prompt tokens to skip when decoding the generated part.
+    check_every:
+        Only run the repetition check every N new tokens (default: 8).
+        Checking every token is wasteful since repetition patterns span
+        many tokens.
+    """
+
+    def __init__(
+        self,
+        tokenizer,
+        min_pattern_len: int = 4,
+        max_repeats: int = 8,
+        input_len: int = 0,
+        check_every: int = 8,
+    ):
+        self.tokenizer = tokenizer
+        self.min_pattern_len = min_pattern_len
+        self.max_repeats = max_repeats
+        self.input_len = input_len
+        self.check_every = check_every
+        self._step_count = 0
+        # Upper bound on pattern length to check (repeating very long
+        # patterns is rare; capping avoids wasted work).
+        self._max_pattern_check = 80
+
+    def __call__(self, input_ids, scores, **kwargs):
+        # Throttle: only check every N steps
+        self._step_count += 1
+        if self._step_count % self.check_every != 0:
+            return False
+
+        generated_ids = input_ids[0][self.input_len:]
+        min_chars = self.min_pattern_len * self.max_repeats
+        if len(generated_ids) < min_chars:
+            return False
+
+        # Only decode the *tail* where a repeat could live.
+        # We need at most (max_pattern_check * max_repeats) chars from the end.
+        tail_len = self._max_pattern_check * self.max_repeats
+        tail_ids = generated_ids[-tail_len:]
+        tail_text = self.tokenizer.decode(tail_ids, skip_special_tokens=False)
+
+        # Also try decoding the raw token text of the last few tokens for
+        # tighter detection of token-boundary repeats.
+        text_len = len(tail_text)
+        if text_len < min_chars:
+            return False
+
+        # Check from the end: for each candidate pattern length L, see if
+        # the last (L * max_repeats) chars are exactly the same L-char
+        # substring repeated max_repeats times.
+        max_L = min(self._max_pattern_check, text_len // self.max_repeats)
+        for L in range(self.min_pattern_len, max_L + 1):
+            block = tail_text[-L * self.max_repeats:]
+            pattern = block[:L]
+            # Quick check: all L-length slices must equal pattern
+            matches = True
+            for r in range(1, self.max_repeats):
+                if block[r * L:(r + 1) * L] != pattern:
+                    matches = False
+                    break
+            if matches:
+                return True
+
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Model loading
 # ---------------------------------------------------------------------------
 
@@ -379,6 +472,8 @@ def generate_answer(
     top_p: float = 0.95,
     clean_tags: bool = False,
     system_prompt: str | None = None,
+    repetition_max_repeats: int | None = None,
+    repetition_min_len: int = 4,
 ) -> str:
     """Generate a CoT answer for a single problem.
 
@@ -392,6 +487,10 @@ def generate_answer(
         clean_tags: If True, strip <think>...</think> tags (for DeepSeek-R1 models).
         system_prompt: Override the default system prompt. If None, uses SYSTEM_PROMPT.
             Pass an empty string "" for no system prompt.
+        repetition_max_repeats: If set, stop generation when the same substring
+            of length >= ``repetition_min_len`` repeats this many times
+            consecutively.  ``None`` disables repetition detection.
+        repetition_min_len: Minimum pattern length for repetition detection.
 
     Returns:
         Generated text (only the new tokens, not the prompt).
@@ -421,6 +520,18 @@ def generate_answer(
     if im_end_id is not None and im_end_id != tokenizer.eos_token_id:
         eos_token_ids.append(im_end_id)
 
+    # Build stopping criteria (optional repetition detection)
+    stopping_criteria = None
+    if repetition_max_repeats is not None and repetition_max_repeats > 0:
+        stopping_criteria = StoppingCriteriaList([
+            RepetitionStoppingCriteria(
+                tokenizer,
+                min_pattern_len=repetition_min_len,
+                max_repeats=repetition_max_repeats,
+                input_len=input_len,
+            )
+        ])
+
     with torch.no_grad():
         outputs = model.generate(
             **inputs,
@@ -430,6 +541,7 @@ def generate_answer(
             top_p=top_p,
             pad_token_id=tokenizer.eos_token_id,
             eos_token_id=eos_token_ids,
+            stopping_criteria=stopping_criteria,
         )
 
     generated_ids = outputs[0][input_len:]
@@ -467,6 +579,8 @@ def evaluate(
     output: str | None = None,
     report_path: str | None = None,
     system_prompt: str | None = None,
+    repetition_max_repeats: int | None = None,
+    repetition_min_len: int = 4,
 ):
     """Evaluate a model on a test dataset and report accuracy.
 
@@ -482,6 +596,9 @@ def evaluate(
         output: If set, write all predictions as JSONL to this path.
         report_path: If set, write the accuracy report to this file.
         system_prompt: Override system prompt. None = default. "" = no system prompt.
+        repetition_max_repeats: Stop generation when a substring repeats this
+            many times consecutively. None disables repetition detection.
+        repetition_min_len: Minimum pattern length for repetition detection.
 
     Returns:
         dict: Accuracy statistics per dataset.
@@ -501,6 +618,8 @@ def evaluate(
                 output=_suffix_path(output, ds) if output else None,
                 report_path=_suffix_path(report_path, ds) if report_path else None,
                 system_prompt=system_prompt,
+                repetition_max_repeats=repetition_max_repeats,
+                repetition_min_len=repetition_min_len,
             )
         return results
 
@@ -553,6 +672,8 @@ def evaluate(
             top_p=top_p,
             clean_tags=clean_tags,
             system_prompt=system_prompt,
+            repetition_max_repeats=repetition_max_repeats,
+            repetition_min_len=repetition_min_len,
         )
 
         # Extract final answer
@@ -754,6 +875,16 @@ def main():
         help="Override system prompt. Pass empty string '' for no system prompt. "
              "Default: math expert prompt.",
     )
+    parser.add_argument(
+        "--repetition_max_repeats", type=int, default=None,
+        help="Stop generation when a substring repeats this many times "
+             "consecutively (default: no repetition detection). "
+             "Recommended: 8-10 for catching degenerate loops.",
+    )
+    parser.add_argument(
+        "--repetition_min_len", type=int, default=4,
+        help="Minimum pattern length for repetition detection (default: 4).",
+    )
     args = parser.parse_args()
 
     evaluate(
@@ -768,6 +899,8 @@ def main():
         output=args.output,
         report_path=args.report,
         system_prompt=args.system_prompt,
+        repetition_max_repeats=args.repetition_max_repeats,
+        repetition_min_len=args.repetition_min_len,
     )
 
 

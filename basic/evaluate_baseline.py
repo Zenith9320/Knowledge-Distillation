@@ -98,6 +98,15 @@ def main():
         "--verbose", "-v", action="store_true",
         help="Print per-sample predictions",
     )
+    parser.add_argument(
+        "--repetition_max_repeats", type=int, default=None,
+        help="Stop generation when a substring repeats this many times "
+             "consecutively (e.g. 8-10 to catch \\nmoire\\nmoire... loops).",
+    )
+    parser.add_argument(
+        "--repetition_min_len", type=int, default=4,
+        help="Minimum pattern length for repetition detection (default: 4).",
+    )
     args = parser.parse_args()
 
     is_instruct = "Instruct" in args.model or "instruct" in args.model.lower()
@@ -113,6 +122,8 @@ def main():
     print(f"  System prompt: {'(none)' if args.no_system_prompt else args.system_prompt[:60] + '...'}")
     if args.max_samples:
         print(f"  Max samples:   {args.max_samples}")
+    if args.repetition_max_repeats:
+        print(f"  Repetition stop: {args.repetition_max_repeats} repeats (min_len={args.repetition_min_len})")
     print()
 
     os.makedirs(RESULTS_DIR, exist_ok=True)
@@ -129,6 +140,8 @@ def main():
         output=PREDICTIONS_TEMPLATE + ".jsonl",
         report_path=REPORT_TEMPLATE + ".txt",
         system_prompt=system_prompt,
+        repetition_max_repeats=args.repetition_max_repeats,
+        repetition_min_len=args.repetition_min_len,
     )
 
     # Print summary for paper-ready comparison
