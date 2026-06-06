@@ -7,9 +7,6 @@ the student model's mathematical reasoning accuracy.
 
 Supports both the Instruct and Base variants of Qwen2.5-0.5B.
 
-Uses batched left-padded inference for efficiency — set --batch_size according
-to available GPU memory (default: 8).
-
 Usage:
     # Base model (recommended for clean distillation experiments)
     python evaluate_baseline.py --dataset gsm8k
@@ -20,12 +17,6 @@ Usage:
 
     # Quick smoke test
     python evaluate_baseline.py --max_samples 50
-
-    # Larger batch for more GPU throughput (trades memory for speed)
-    python evaluate_baseline.py --batch_size 16
-
-    # Smaller batch if running out of VRAM
-    python evaluate_baseline.py --batch_size 4
 
     # Base model without system prompt
     python evaluate_baseline.py --no_system_prompt
@@ -68,7 +59,7 @@ REPORT_TEMPLATE = os.path.join(RESULTS_DIR, "baseline-report")
 # Evaluation parameters — matched to fine-tuned model evaluation for fair comparison.
 EVAL_TEMPERATURE = 0.6
 EVAL_TOP_P = 0.95
-MAX_NEW_TOKENS = 2048
+MAX_NEW_TOKENS = 4096
 
 
 def main():
@@ -102,10 +93,6 @@ def main():
     parser.add_argument(
         "--no_system_prompt", action="store_true",
         help="Omit system prompt entirely.",
-    )
-    parser.add_argument(
-        "--batch_size", type=int, default=8,
-        help="Number of samples to process in parallel (default: 8)",
     )
     parser.add_argument(
         "--verbose", "-v", action="store_true",
@@ -142,14 +129,10 @@ def main():
         output=PREDICTIONS_TEMPLATE + ".jsonl",
         report_path=REPORT_TEMPLATE + ".txt",
         system_prompt=system_prompt,
-        batch_size=args.batch_size,
     )
 
     # Print summary for paper-ready comparison
     if results:
-        # Normalize: single-dataset returns flat dict, "both" returns nested dict.
-        if "dataset" in results:
-            results = {results["dataset"]: results}
         print("\n" + "=" * 60)
         print("Baseline Summary (for paper Table)")
         print("=" * 60)
