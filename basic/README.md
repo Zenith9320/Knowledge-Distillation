@@ -1760,6 +1760,7 @@ basic/
 
 | 任务 | 说明 |
 |------|------|
+| **Base 模型消融实验** | 在 Base 模型上系统对比 single-temp / double-temp / adaptive（含 dedup）的蒸馏效果，验证 semantic deduplication 和多温度 Teacher CoT 在纯净起点上的独立贡献 |
 | 自适应阈值校准 | 通过 pilot study 分析 log-probability 分布，设定合适的 τ，让 Round 2 高温重采样真正触发 |
 | Token 上限提升 | MATH 26.8% 因 max_tokens=4096 截断，探索 8192 或更高 |
 | 低质量 CoT 过滤 | 过滤自校正模式（"wait"、"Oops"等，~0.7%）和高重复样本（~0.2%） |
