@@ -1,164 +1,84 @@
 # Knowledge Distillation: Chain-of-Thought Reasoning from DeepSeek-R1 to Tiny Models
 
-This project distills chain-of-thought (CoT) reasoning capabilities from **DeepSeek-R1-Distill-Qwen-1.5B** (teacher) into smaller student models (e.g. Qwen2.5-0.5B, TinyLlama) using GSM8K and MATH datasets.
+This project distills chain-of-thought (CoT) reasoning capabilities from **DeepSeek-R1-Distill-Qwen-1.5B** (teacher) into **Qwen2.5-0.5B** (student) on GSM8K and MATH benchmarks.
+
+详细文档见 **[basic/README.md](basic/README.md)**。
 
 ## References
 
-- [DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning](docs/)
-- [Large Language Models Are Reasoning Teachers](docs/)
+- [DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning](docs/DeepSeek-R1%20Incentivizing%20Reasoning%20Capability%20in%20LLMs%20via%20Reinforcement%20Learning.pdf)
+- [Large Language Models Are Reasoning Teachers](docs/Large%20Language%20Models%20Are%20Reasoning%20Teachers.pdf)
+
+## Pipeline
+
+| 阶段 | 说明 | 详见 |
+|------|------|------|
+| 数据集准备 | GSM8K / MATH → 统一 JSONL | [第一步](basic/README.md#第一步数据集加载) |
+| Teacher CoT 生成 | vLLM 批量 / 单温度 / 双温度 / 自适应采样 | [第二步](basic/README.md#第二步teacher-生成-cot) |
+| 答案过滤 | `\boxed{}` 提取 + 比对 + 语义去重 | [第三步](basic/README.md#第三步答案过滤) |
+| 数据集构建 | 合并、去重、打乱 → SFT 训练集 | [第四步](basic/README.md#第四步数据集合并) |
+| Student 微调 | Instruct → Base，SFT + label masking | [第五步](basic/README.md#第五步student-sft-微调) |
+| 测试评估 | GSM8K + MATH，含 baseline 对比 | [第六步](basic/README.md#第六步测试评估) |
+
+## Results Summary
+
+| 模型 | 基座 | 训练样本 | GSM8K | MATH |
+|------|------|----------|-------|------|
+| Baseline (未微调) | Instruct | — | 40.94% | 22.72% |
+| `qwen-single_temp` | Instruct | 11,639 | 38.89% | 19.76% |
+| `qwen-double_temp` | Instruct | 16,261 | 39.88% | 20.24% |
+| `qwen-adaptive` | Instruct | 34,024 | 41.55% | 19.04% |
+| Baseline (未微调) | Base | — | 13.80% | 13.04% |
+| `qwen-base-adaptive` | Base | 17,231 | **42.76%** | **23.28%** |
+
+> 详见 [所有模型汇总](basic/README.md#55-所有模型汇总)
+
+## Key Findings
+
+- **蒸馏税 (Distillation Tax)**：Instruct 模型微调后性能反而不如未微调，因为 CoT 风格与原生推理风格冲突。MATH 上三个微调模型全部不如 Baseline。
+- **Base 模型纯净收益**：切换到 Base 模型后，GSM8K +28.96pp（13.80% → 42.76%），MATH +10.24pp（13.04% → 23.28%），收益可干净归因于蒸馏。
+- **语义去重至关重要**：adaptive 采样中 52.6% 问题有近重复样本，去重后半数样本即可达到相同覆盖率。
+- **覆盖率 > 样本数**：问题覆盖率是比样本数更好的数据集质量指标。
+
+> 详见 [关键发现](basic/README.md#关键发现)
 
 ## Project Structure
 
 ```
 Knowledge-Distillation/
-├── README.md                          # This file
-├── docs/                              # Reference papers
+├── README.md                              # This file
+├── docs/                                  # Reference papers
+├── paper/                                 # Mini-paper (NeurIPS 2023 format)
+│   ├── main.tex
+│   ├── neurips_2023.sty
+│   └── ref.bib
 ├── basic/
-│   ├── README.md                      # Detailed documentation (pipeline, methodology, results)
-│   ├── data/                          # All generated JSONL data files
-│   ├── load_grade_school_math_dataset.py  # Step 0: GSM8K data preprocessing
-│   ├── load_MATH_dataset.py               # Step 0: MATH data preprocessing
-│   ├── generate_CoT_vllm.py               # Step 1a: Teacher CoT generation (vLLM batch)
-│   ├── generate_CoT_adaptive.py           # Step 1b: Teacher CoT generation (adaptive sampling)
-│   ├── generate_CoT.py                    # Step 1: [Legacy] HF native inference, reference only
-│   ├── deduplicate_by_similarity.py       # Step 2a: Multi-temperature answer dedup
-│   ├── filter.py                          # Step 2b: Boxed extraction + answer comparison
-│   ├── filter_adaptive.py                 # Step 2b: Adaptive filter (per-problem matching)
-│   ├── merge_datasets.py                  # Step 3: Merge GSM8K + MATH correct samples
-│   └── finetune_student.py                # Step 4: Student SFT fine-tuning
+│   ├── README.md                          # Detailed documentation
+│   ├── data/                              # All generated JSONL data files
+│   ├── results/                           # Evaluation predictions & reports
+│   ├── models/                            # Fine-tuned student models
+│   ├── load_grade_school_math_dataset.py  # Step 0: GSM8K preprocessing
+│   ├── load_MATH_dataset.py               # Step 0: MATH preprocessing
+│   ├── generate_CoT_vllm.py               # Step 1: vLLM batch generation
+│   ├── generate_CoT_adaptive.py           # Step 1: Adaptive sampling
+│   ├── generate_CoT.py                    # Step 1: [Legacy] HF native inference
+│   ├── deduplicate_by_similarity.py       # Step 2: Semantic dedup
+│   ├── filter.py                          # Step 2: Boxed extraction + comparison
+│   ├── filter_adaptive.py                 # Step 2: Adaptive filter
+│   ├── merge_datasets.py                  # Step 3: Merge + shuffle
+│   ├── shuffle_jsonl.py                   # Step 3: Standalone shuffle tool
+│   ├── finetune_student.py                # Step 4: Instruct SFT
+│   ├── finetune_student_base.py           # Step 4: Base SFT
+│   ├── evaluate.py                        # Step 5: Evaluation
+│   └── evaluate_baseline.py               # Step 5: Baseline evaluation
 ```
 
-## Pipeline Overview
-
-| Step | Description | Status |
-|------|-------------|--------|
-| 0 — Data Preparation | Extract problems & answers from GSM8K / MATH into unified JSONL | Done |
-| 1 — Teacher CoT Generation | Generate CoT reasoning with DeepSeek-R1 (vLLM batch / adaptive sampling) | Done |
-| 2 — Answer Filtering | Extract `\boxed{}` answers, compare with ground truth, filter correct samples | Done |
-| 3 — Dataset Merging | Merge GSM8K + MATH correct samples into shuffled SFT training set | Done |
-| 4 — Student Fine-tuning | SFT student model (Qwen2.5-0.5B / TinyLlama) on CoT traces | Script ready |
-| 5 — Evaluation | Evaluate student model accuracy on test splits | TODO |
-
-### Step 0: Data Preparation
-
-Convert GSM8K and MATH raw data into unified `{"problem": ..., "answer": ...}` JSONL format.
-
-| Dataset | Train | Test | Source |
-|---------|-------|------|--------|
-| GSM8K | 7,473 | 1,319 | Local `grade-school-math` repo |
-| MATH | 11,248 | 1,250 | HuggingFace `qwedsacf/competition_math` (90/10 split) |
+## Environment
 
 ```bash
-python basic/load_grade_school_math_dataset.py
-python basic/load_MATH_dataset.py
-```
-
-### Step 1: Teacher CoT Generation
-
-Teacher model: **DeepSeek-R1-Distill-Qwen-1.5B**. Two generation methods available:
-
-**1a. vLLM Batch Generation** (`generate_CoT_vllm.py`) — Recommended. 10-20x throughput via PagedAttention and continuous batching. Generates at two temperatures (T=0.6 and T=0.9) per problem for multi-temperature dedup.
-
-```bash
-python basic/generate_CoT_vllm.py                          # Both datasets, all samples
-python basic/generate_CoT_vllm.py --dataset gsm8k --max_samples 10  # Quick test
-```
-
-**1b. Adaptive Sampling** (`generate_CoT_adaptive.py`) — Dynamically adjusts sampling per problem. Round 1: low-T (0.3) with n=3. If any sample's avg logprob passes threshold, done; otherwise Round 2+ iterates with high-T (0.9), n=2 per iter, up to 4 rounds. GSM8K result: all 7,473 problems passed Round 1 (22,419 answers total).
-
-```bash
-python basic/generate_CoT_adaptive.py --dataset gsm8k
-```
-
-### Step 2: Answer Filtering
-
-**2a. Multi-Temperature Dedup** (`deduplicate_by_similarity.py`) — For vLLM pipeline: remove near-duplicate answers between low-T and high-T generations using Sentence-BERT cosine similarity (threshold=0.92).
-
-| Dataset | Low-T Input | High-T Input | After Dedup | Discarded | Retention |
-|---------|------------|-------------|-------------|-----------|-----------|
-| GSM8K | 7,473 | 7,473 | 11,568 | 3,378 | 77.4% |
-| MATH | 11,248 | 5,087 | 14,700 | 1,635 | 90.0% |
-
-**2b. Boxed Extraction & Comparison** (`filter.py` / `filter_adaptive.py`) — Extract `\boxed{}` content from CoT answers, clean formatting, compare with ground truth. `filter_adaptive.py` matches by problem text (not line index) for multi-answer adaptive output.
-
-| Dataset | Pipeline | Total | Correct | Accuracy | ≥1 Correct per Problem |
-|---------|----------|-------|---------|----------|------------------------|
-| GSM8K | Single T=0.6 | 7,473 | 6,298 | 84.28% | — |
-| GSM8K | Deduped (T=0.6+0.9) | 11,568 | 9,508 | 82.19% | 89.4% |
-| GSM8K | Adaptive (T=0.3, n=3) | 22,419 | 18,916 | 84.37% | 92.8% |
-| MATH | Single T=0.6 | 11,248 | 5,341 | 47.48% | — |
-| MATH | Deduped (T=0.6+0.9) | 14,700 | 6,753 | 45.94% | 50.3% |
-
-### Step 3: Dataset Merging
-
-Merge GSM8K and MATH correct samples into a single shuffled training set for SFT.
-
-```bash
-python basic/merge_datasets.py \
-  basic/data/gsm8k_train_cot_dedup_correct.jsonl \
-  basic/data/math_train_cot_dedup_correct.jsonl \
-  -o basic/data/train_cot_correct_merged.jsonl
-```
-
-### Step 4: Student Fine-Tuning
-
-SFT student model (default Qwen2.5-0.5B-Instruct) on merged CoT traces. Supports full fine-tuning and LoRA.
-
-```bash
-python basic/finetune_student.py                           # Full fine-tuning
-python basic/finetune_student.py --lora                     # LoRA (low VRAM)
-python basic/finetune_student.py --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 --lora
-```
-
-### Step 5: Evaluation (TODO)
-
-Evaluate fine-tuned student on GSM8K and MATH test splits. Metrics: final answer exact-match accuracy.
-
-## Environment Setup
-
-Use mamba (miniforge) to create an isolated environment:
-
-```bash
-# 1. Create environment
-mamba create -n kd python=3.12 -y
-mamba activate kd
-
-# 2. Install PyTorch with CUDA
+mamba create -n kd python=3.12 -y && mamba activate kd
 mamba install "pytorch=2.5.1=*cuda*" torchvision torchaudio \
   pytorch-cuda=12.4 -c pytorch -c nvidia -c conda-forge --override-channels -y
-
-# 3. Install HuggingFace ecosystem
 mamba install transformers accelerate datasets tqdm -c conda-forge -y
-
-# 4. (Optional) vLLM for batch inference acceleration
-pip install vllm
+pip install vllm  # optional, for batch inference
 ```
-
-Verify:
-
-```bash
-python -c "import torch,transformers,accelerate,tqdm,datasets; \
-  print(f'PyTorch {torch.__version__}'); \
-  print(f'CUDA:{torch.cuda.is_available()}'); \
-  print(f'GPU:{torch.cuda.get_device_name(0)}'); \
-  x=torch.randn(3,3).cuda(); print(f'MATMUL OK:{(x@x.T).shape}'); \
-  print(f'transformers {transformers.__version__}'); print('OK')"
-```
-
-**Notes:**
-- PyTorch must be installed from the pytorch channel with `*cuda*` build tag; conda-forge defaults to CPU-only.
-- `--override-channels` prevents conda-forge from overriding with CPU builds.
-- Python 3.13 is not yet recommended due to package compatibility.
-
-## Key Design Decisions
-
-| Aspect | Choice |
-|--------|--------|
-| Teacher | DeepSeek-R1-Distill-Qwen-1.5B |
-| Students | Qwen2.5-0.5B-Instruct / TinyLlama-1.1B-Chat-v1.0 |
-| Datasets | GSM8K (7,473 train), MATH (11,248 train) |
-| Generation | vLLM PagedAttention (batch) + Adaptive sampling (per-problem) |
-| Answer extraction | `\boxed{}` with `**Answer:**` + last-number fallbacks |
-| Dedup | Sentence-BERT cosine similarity (threshold 0.92) |
-| Distillation method | CoT trace SFT (reasoning teacher paradigm) |
-| Evaluation | Exact-match accuracy on final answers |
