@@ -1,0 +1,30 @@
+
+============================================================
+MATH Evaluation Results
+============================================================
+Model: models/qwen-base-adaptive
+Samples: 1250
+
+--- Sample-level ---
+  Correct:                291   (23.3%)
+  Empty final_answer:     45   (3.6%)
+  Valid (non-empty):      1205   (96.4%)
+
+Accuracy (correct / total):         23.28%
+Accuracy (correct / valid):         24.15%
+
+--- By Type ---
+  Algebra                    total=  284  empty=   4  correct=  120  acc= 42.3%  v_acc= 42.9%
+  Counting & Probability     total=  133  empty=   6  correct=   19  acc= 14.3%  v_acc= 15.0%
+  Geometry                   total=  121  empty=   5  correct=   18  acc= 14.9%  v_acc= 15.5%
+  Intermediate Algebra       total=  247  empty=  12  correct=   28  acc= 11.3%  v_acc= 11.9%
+  Number Theory              total=  153  empty=  10  correct=   27  acc= 17.6%  v_acc= 18.9%
+  Prealgebra                 total=  183  empty=   5  correct=   63  acc= 34.4%  v_acc= 35.4%
+  Precalculus                total=  129  empty=   3  correct=   16  acc= 12.4%  v_acc= 12.7%
+
+--- By Level ---
+  Level 1      total=   87  empty=   1  correct=   48  acc= 55.2%  v_acc= 55.8%
+  Level 2      total=  204  empty=   3  correct=   78  acc= 38.2%  v_acc= 38.8%
+  Level 3      total=  294  empty=   9  correct=   77  acc= 26.2%  v_acc= 27.0%
+  Level 4      total=  301  empty=  13  correct=   58  acc= 19.3%  v_acc= 20.1%
+  Level 5      total=  364  empty=  19  correct=   30  acc=  8.2%  v_acc=  8.7%
