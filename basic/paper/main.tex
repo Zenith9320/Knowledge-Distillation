@@ -21,6 +21,7 @@
 \usepackage{xcolor}         % colors
 
 \usepackage{float}          % table float placement
+\usepackage{graphicx}       % figures
 \usepackage{amsmath}
 
 \usepackage{enumitem}       % customized lists
@@ -41,7 +42,7 @@
 
 
 \begin{abstract}
-Large language models (LLMs) have demonstrated remarkable capabilities in mathematical reasoning, yet their computational requirements pose challenges for practical deployment. Knowledge distillation offers a promising approach to compress these capabilities into smaller models. In this paper, we investigate chain-of-thought (CoT) knowledge distillation for mathematical reasoning, using DeepSeek-R1-Distill-Qwen-1.5B as the teacher and Qwen2.5-0.5B as the student. We explore two complementary strategies for constructing CoT training data: double-temperature generation with semantic deduplication, and adaptive sampling with log-probability confidence scoring. Our experiments on GSM8K and MATH compare these strategies against single-temperature generation, revealing key trade-offs between data quantity, diversity, and downstream performance. We identify a \textit{distillation tax} with instruction-tuned models-where fine-tuning on foreign-style CoT traces degrades native reasoning-and show that switching to a base model eliminates this confound, yielding genuine improvements unambiguously attributable to distillation. We further demonstrate that semantic deduplication is critical for preventing template overfitting while preserving problem coverage, and that multi-temperature generation provides meaningfully diverse reasoning paths that single-temperature multi-sampling cannot replicate.
+Large language models (LLMs) have demonstrated remarkable capabilities in mathematical reasoning, yet their computational requirements pose challenges for practical deployment. In this paper, we investigate chain-of-thought (CoT) knowledge distillation for mathematical reasoning, using DeepSeek-R1-Distill-Qwen-1.5B as the teacher and Qwen2.5-0.5B as the student. We compare multiple strategies for constructing CoT training data on GSM8K and MATH benchmarks, and identify a \textit{distillation tax}: fine-tuning instruction-tuned models on foreign-style CoT traces degrades their native reasoning. Switching to a base model eliminates this confound, yielding improvements unambiguously attributable to distillation. We further demonstrate that semantic deduplication is critical for preventing template overfitting while preserving problem coverage, and that multi-temperature generation provides meaningfully diverse reasoning paths that single-temperature multi-sampling cannot replicate.
 \end{abstract}
 
 
@@ -59,14 +60,7 @@ Knowledge distillation provides a principled framework for transferring knowledg
 
 However, a key challenge in CoT distillation is the quality and diversity of the generated training data. Single-temperature generation may either lack diversity (at low temperatures) or produce noisy, incorrect reasoning traces (at high temperatures). Furthermore, the choice of sampling strategy directly impacts the coverage of correct solutions and the efficiency of the distillation pipeline.
 
-In this work, we address these challenges through two complementary strategies for constructing high-quality CoT training data:
-
-\begin{enumerate}[leftmargin=*]
-    \item \textbf{Double-Temperature Generation with Semantic Deduplication.} By generating CoT traces at two distinct temperatures ($T = 0.6$ for quality and $T = 0.9$ for diversity) and applying semantic similarity-based deduplication, we expand training coverage while minimizing redundancy-retaining diverse reasoning paths only when they are meaningfully different.
-    \item \textbf{Adaptive Sampling with Log-Probability Confidence.} We propose a confidence-guided multi-sampling strategy that uses per-token log-probability scores to dynamically allocate sampling budget: low-temperature generation suffices for high-confidence problems, while high-temperature resampling is reserved for cases where the teacher exhibits uncertainty. This eliminates the computational overhead of traditional self-consistency voting while maintaining high answer quality.
-\end{enumerate}
-
-We conduct comprehensive experiments comparing single-temperature, double-temperature with semantic deduplication, and adaptive sampling strategies, providing insights into the trade-offs between data quality, diversity, and computational efficiency.
+In this work, we address these challenges by exploring multiple CoT generation strategies—including multi-temperature sampling with semantic deduplication and confidence-guided adaptive sampling—and comparing their effects on training data quality, diversity, and downstream student performance on GSM8K and MATH benchmarks.
 
 \section{Related Work}
 
@@ -77,15 +71,6 @@ Knowledge distillation trains a compact student model to mimic the output distri
 \subsection{Large Language Models for Mathematical Reasoning}
 
 Recent advances in large language models have significantly pushed the boundaries of mathematical reasoning. DeepSeek-R1~\cite{deepseek2025r1} demonstrates that reinforcement learning can effectively incentivize reasoning capabilities in LLMs, producing models that generate detailed chain-of-thought reasoning traces. These reasoning traces are particularly valuable for knowledge distillation, as they reveal the intermediate steps and logical deductions that lead to correct answers. However, deploying such large models directly is computationally expensive, motivating the use of distillation to transfer their reasoning capabilities into smaller, more efficient models.
-
-\subsection{Mathematical Reasoning Benchmarks}
-
-We evaluate on GSM8K (8,500 grade-school math word problems) and MATH (12,500 competition-level problems across seven subjects and five difficulty levels), providing complementary evaluation of basic multi-step reasoning and advanced problem-solving.
-
-\subsection{Adaptive and Multi-Temperature Sampling}
-
-Temperature-based sampling strategies have been widely explored for improving the quality and diversity of LLM-generated text. Self-consistency methods sample multiple reasoning paths at a fixed temperature and select the most frequent answer via majority voting, but incur significant computational overhead. Adaptive temperature strategies aim to allocate sampling budget more efficiently by adjusting temperature based on problem difficulty or model confidence. Our work builds on these ideas by using per-token log-probability scores-which are natively available in modern LLM inference engines-as a lightweight confidence signal, eliminating the need for multiple sampling rounds for confidence estimation.
-
 
 \section{Method}
 
@@ -339,6 +324,13 @@ Adaptive + Dedup              & 17,231 & \textbf{92.8\%} & \textbf{54.2\%} & 1.3
 \end{tabular}
 \end{table}
 
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{figures/coverage_comparison.pdf}
+    \caption{Training data coverage by strategy. Numbers above bars indicate total correct samples.}
+    \label{fig:coverage}
+\end{figure}
+
 \subsection{Student Fine-tuning}
 
 We fine-tuned Qwen2.5-0.5B-Instruct on each of the three training datasets (single-temperature, double-temperature, and adaptive), and subsequently fine-tuned Qwen2.5-0.5B base on the adaptive\_dedup dataset (17,231 samples). All runs used identical hyperparameters as described in Section~3.5 (3 epochs, effective batch size 16, $\text{lr}=2\times10^{-5}$, BF16, max 1,024 tokens, 5\% eval split). The best checkpoint per run was selected by lowest evaluation loss.
@@ -398,11 +390,18 @@ Base + Adaptive\_Dedup        & \textbf{42.76\%} & \textbf{23.28\%} & \textbf{43
 \end{tabular}
 \end{table}
 
-The baseline base model achieves only 13.80\% accuracy on GSM8K and 13.04\% on MATH, with empty-answer rates of 58.0\% and 44.3\% respectively. The MATH empty rate is lower than GSM8K's partly because MATH problems elicit longer reasoning traces before degeneration occurs, and partly because MATH's more structured problem statements provide stronger generation anchoring. The accuracy gap between benchmarks is negligible (0.76 pp), confirming that the untuned base model lacks meaningful mathematical reasoning capability on both simple and complex problems. A closer examination of the GSM8K baseline predictions reveals a deeper issue: 128 of 1,319 samples (9.7\%) exhibit \textbf{degenerative looping}, where the model falls into a repetitive token pattern-outputting the same token or short phrase hundreds of times (e.g., ``moire'' repeated 700+ times, ``RTOS'' repeated 500+ times, or random Unicode fragments such as ``鲕'' and ``离退休'' appearing in English math contexts). This degeneration behavior is characteristic of base models prompted beyond their capabilities, and accounts for a substantial portion of the empty-answer rate: looped outputs rarely contain extractable answers.
+The baseline base model achieves only 13.80\% accuracy on GSM8K and 13.04\% on MATH, with empty-answer rates of 58.0\% and 44.3\% respectively. A closer examination of the GSM8K baseline predictions reveals a deeper issue: 128 of 1,319 samples (9.7\%) exhibit \textbf{degenerative looping}, where the model falls into a repetitive token pattern-outputting the same token or short phrase hundreds of times . This degeneration behavior is characteristic of base models prompted beyond their capabilities, and accounts for a substantial portion of the empty-answer rate: looped outputs rarely contain extractable answers.
 
 After fine-tuning on the adaptive\_dedup dataset, GSM8K accuracy improves to 42.76\% (+28.96 pp) and MATH to 23.28\% (+10.24 pp), while empty rates collapse from 58.0\%/44.3\% to 1.2\%/3.6\%. The MATH gain of 23.28\% is particularly significant: it exceeds the Instruct baseline (22.72\%) and all Instruct fine-tuned models (best: double-temperature, 20.24\%), marking the first time distillation produces positive MATH improvement over the unmodified model. This is in stark contrast to the Instruct-based results where every fine-tuned model underperformed the baseline on MATH (Section~4.4.1).
 
 The dramatic reduction in empty outputs reflects more than just improved reasoning: the fine-tuned model has learned to produce properly formatted outputs with \texttt{\textbackslash{}boxed\{\}} markers, closely aligning with the teacher's CoT style. The format alignment is evident in the valid-answer rates: 98.8\% (GSM8K) and 96.4\% (MATH) of fine-tuned outputs contain extractable answers, compared to only 42.0\%/55.7\% for the zero-shot baseline. The fine-tuned model also exhibits virtually no degenerative looping, demonstrating that the CoT distillation process simultaneously teaches three capabilities: (1) mathematical reasoning itself, (2) output format discipline (\texttt{\textbackslash{}boxed\{\}} adherence), and (3) generation stability (prevention of repetitive token collapse). Unlike the Instruct model, the base model has no prior mathematical reasoning capability or format discipline, so the improvements are unambiguously attributable to the distillation process. Notably, the base+adaptive\_dedup model (42.76\% GSM8K, 23.28\% MATH) outperforms the best Instruct-based fine-tuned model (adaptive: 41.55\% GSM8K, double-temp: 20.24\% MATH), despite using half the training samples (17,231 vs.\ 34,024) and starting from a far weaker baseline (13.80\% vs.\ 40.94\% on GSM8K). This confirms that the switch to the base model was essential for valid measurement of distillation effectiveness, and that semantic deduplication preserves sufficient training signal quality while eliminating redundant samples.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{figures/student_accuracy.pdf}
+    \caption{Student model accuracy on GSM8K and MATH. The dashed line separates Instruct-based models (left) from Base models (right).}
+    \label{fig:accuracy}
+\end{figure}
 
 \subsubsection{The Role of Semantic Deduplication and Multi-Temperature Diversity}
 
